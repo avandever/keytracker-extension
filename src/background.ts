@@ -33,13 +33,21 @@ function makeSession(): GameSession {
 
 // ─── Session Management ──────────────────────────────────────────────────────
 
-// After a game ends, ignore new gamestate events for this many ms.
-// Post-game lobby states keep arriving from the server for ~10s.
-const POST_GAME_COOLDOWN_MS = 20_000;
-let cooldownUntil = 0;
+// After a game ends, remember the player set so we can ignore post-game
+// gamestates that keep arriving from the server. Cleared when:
+//  - A gamestate arrives with DIFFERENT players (new game with new opponent)
+//  - A removegame lobby event fires (the finished game was removed from lobby)
+let postGamePlayerSet: Set<string> | null = null;
 
-function ensureSession(): GameSession | null {
-  if (Date.now() < cooldownUntil) return null; // post-game cooldown
+function ensureSession(playerNames?: string[]): GameSession | null {
+  if (postGamePlayerSet !== null && playerNames && playerNames.length > 0) {
+    const sameGame =
+      playerNames.length === postGamePlayerSet.size &&
+      playerNames.every((n) => postGamePlayerSet!.has(n));
+    if (sameGame) return null; // still receiving post-game states for finished game
+    // Different players → new game starting; clear the guard
+    postGamePlayerSet = null;
+  }
   if (!currentSession) {
     currentSession = makeSession();
     setBadge("●", "#1565c0"); // blue: in progress
@@ -49,11 +57,16 @@ function ensureSession(): GameSession | null {
 
 function finalizeSession(reason: string): void {
   if (!currentSession) return;
+  // Remember who just played to filter out post-game noise
+  const names = [currentSession.player1, currentSession.player2].filter(
+    Boolean
+  ) as string[];
+  postGamePlayerSet = names.length > 0 ? new Set(names) : null;
+
   currentSession.endTime = Date.now();
   currentSession.gameEndReason = reason;
   completedSessions.push(currentSession);
   currentSession = null;
-  cooldownUntil = Date.now() + POST_GAME_COOLDOWN_MS;
   setBadge(`${completedSessions.length}`, "#2e7d32"); // green: completed
 }
 
@@ -83,30 +96,30 @@ function handleInjectEvent(
       break;
 
     case "KT_GAMESTATE": {
-      const session = ensureSession();
-      if (!session) break; // post-game cooldown — ignore stale server states
+      // Crucible gamestate: players is a dict keyed by username, winner is a list
+      const gs = data as Record<string, unknown>;
+      const playersDict = gs?.players;
+      const playerNames =
+        playersDict &&
+        typeof playersDict === "object" &&
+        !Array.isArray(playersDict)
+          ? Object.keys(playersDict as Record<string, unknown>)
+          : [];
+
+      const session = ensureSession(playerNames);
+      if (!session) break; // post-game guard — same players as finished game
 
       session.events.push(event);
       session.gamestateSnapshots.push(data);
 
-      // Crucible gamestate: players is a dict keyed by username, winner is a list
-      const gs = data as Record<string, unknown>;
-
-      // Extract player names from players dict (keys are usernames)
-      if (!session.player1) {
-        const players = gs?.players;
-        if (players && typeof players === "object" && !Array.isArray(players)) {
-          const names = Object.keys(players as Record<string, unknown>);
-          if (names[0]) session.player1 = names[0];
-          if (names[1]) session.player2 = names[1];
-        }
-      }
+      if (!session.player1 && playerNames[0]) session.player1 = playerNames[0];
+      if (!session.player2 && playerNames[1]) session.player2 = playerNames[1];
       break;
     }
 
     case "KT_GAME_END": {
       const session = ensureSession();
-      if (!session) break; // duplicate end event during cooldown
+      if (!session) break; // guard active — stale end event
       session.events.push(event);
       const end = data as Record<string, unknown>;
       session.winner = String(end?.winner ?? "");
@@ -115,8 +128,15 @@ function handleInjectEvent(
     }
 
     case "KT_SOCKET_EVENT": {
-      // Extract crucible game ID from updategame/newgame lobby events
       const ev = data as Record<string, unknown>;
+
+      // removegame means the finished game is gone from the lobby — safe to
+      // accept new sessions with the same players (rematch scenario)
+      if (ev?.eventName === "removegame") {
+        postGamePlayerSet = null;
+      }
+
+      // Extract crucible game ID from updategame/newgame lobby events
       const extractedId = ev?.extractedGameId;
       if (typeof extractedId === "string") {
         if (currentSession && !currentSession.crucibleGameId) {
