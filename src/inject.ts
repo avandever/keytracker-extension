@@ -40,32 +40,143 @@
   //   "3"                           — PONG
 
   const SOCKET_IO_EVENT_RE = /^42(\[.*)/s;
-  // Game-end patterns from the Crucible log (mirrors WIN_MATCHER in tracker)
-  const WIN_RE = /(\w[\w ]*) has won the game/i;
+
+  // Crucible message alert parts are [{name, argType}, 'string', ...].
+  // Build a plain text string from them.
+  function alertPartsToText(parts: unknown[]): string {
+    return parts
+      .map((p) => {
+        if (typeof p === "string") return p;
+        if (typeof p === "object" && p !== null) {
+          return (p as Record<string, unknown>).name ?? "";
+        }
+        return "";
+      })
+      .join("");
+  }
+
+  // Iterate new messages in a gamestate delta.
+  // messages is a dict like {"423": [{id, date, message}], "_t": "a"}
+  function* iterMessages(
+    messages: Record<string, unknown>
+  ): Generator<string> {
+    for (const [key, val] of Object.entries(messages)) {
+      if (key === "_t") continue;
+      const items = Array.isArray(val) ? val : [val];
+      for (const item of items) {
+        if (typeof item !== "object" || item === null) continue;
+        const alertObj = (item as Record<string, unknown>)?.message as
+          | Record<string, unknown>
+          | undefined;
+        const alert = alertObj?.alert as Record<string, unknown> | undefined;
+        if (!alert) continue;
+        const msgParts = alert.message;
+        if (!Array.isArray(msgParts)) continue;
+        yield alertPartsToText(msgParts);
+      }
+    }
+  }
+
+  // Track active game UUID (populated from updategame lobby events)
+  let activeGameId: string | null = null;
+  // Track last seen player set size to detect opponent leaving
+  let lastPlayerCount = 0;
 
   function handleSocketIoEvent(eventName: string, payload: unknown): void {
     if (eventName === "gamestate") {
       post("KT_GAMESTATE", payload);
 
-      // Try to detect game end from messages array inside gamestate
       const gs = payload as Record<string, unknown>;
-      const messages = gs?.messages as Array<Record<string, unknown>>;
-      if (Array.isArray(messages)) {
-        for (const msg of messages) {
-          const text =
-            (msg?.message as string) ||
-            (msg?.text as string) ||
-            String(msg?.body ?? "");
-          const m = WIN_RE.exec(text);
-          if (m) {
+      const players = gs?.players as Record<string, unknown> | undefined;
+      const playerNames = players ? Object.keys(players) : [];
+
+      // Method 1: winner list directly on gamestate
+      const winnerList = gs?.winner;
+      if (Array.isArray(winnerList) && winnerList.length > 0) {
+        post("KT_GAME_END", {
+          winner: String(winnerList[0]),
+          source: "gamestate.winner",
+          gamestate: payload,
+        });
+        return;
+      }
+
+      // Method 2: scan delta messages for win/concede text
+      const messages = gs?.messages as Record<string, unknown> | undefined;
+      if (messages && typeof messages === "object") {
+        for (const text of iterMessages(messages)) {
+          // "X has won the game"
+          const winMatch = /^(.+) has won the game/.exec(text);
+          if (winMatch) {
             post("KT_GAME_END", {
-              winner: m[1],
+              winner: winMatch[1].trim(),
               rawMessage: text,
+              source: "log_win",
               gamestate: payload,
             });
+            return;
+          }
+          // "X concedes" or "X has conceded"
+          const concedeMatch = /^(.+?) (?:has )?concede/.exec(text);
+          if (concedeMatch) {
+            const loser = concedeMatch[1].trim();
+            const winner = playerNames.find((n) => n !== loser) ?? "unknown";
+            post("KT_GAME_END", {
+              winner,
+              loser,
+              rawMessage: text,
+              source: "log_concede",
+              gamestate: payload,
+            });
+            return;
+          }
+          // "X has left the game" — opponent quit without concede message
+          const leftMatch = /^(.+?) has left the game/.exec(text);
+          if (leftMatch) {
+            const leaver = leftMatch[1].trim();
+            const winner = playerNames.find((n) => n !== leaver) ?? "unknown";
+            post("KT_GAME_END", {
+              winner,
+              loser: leaver,
+              rawMessage: text,
+              source: "log_left",
+              gamestate: payload,
+            });
+            return;
           }
         }
       }
+
+      // Method 3: player count drop — opponent disconnected mid-game
+      if (lastPlayerCount === 2 && playerNames.length === 1) {
+        post("KT_GAME_END", {
+          winner: playerNames[0],
+          source: "player_count_drop",
+          gamestate: payload,
+        });
+      }
+      lastPlayerCount = playerNames.length;
+
+    } else if (
+      eventName === "updategame" ||
+      eventName === "newgame"
+    ) {
+      // Extract active game ID from lobby events
+      const items = Array.isArray(payload) ? payload : [payload];
+      for (const item of items) {
+        if (typeof item !== "object" || item === null) continue;
+        const g = item as Record<string, unknown>;
+        if (g.started === true && typeof g.id === "string") {
+          activeGameId = g.id;
+          post("KT_SOCKET_EVENT", {
+            eventName,
+            payload,
+            extractedGameId: g.id,
+          });
+          return;
+        }
+      }
+      post("KT_SOCKET_EVENT", { eventName, payload });
     } else if (eventName === "game chat" || eventName === "chat") {
       post("KT_GAME_CHAT", { eventName, payload });
     } else {

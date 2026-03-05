@@ -80,19 +80,17 @@ function handleInjectEvent(
       session.events.push(event);
       session.gamestateSnapshots.push(data);
 
-      // Try to extract crucible game ID from gamestate payload
+      // Crucible gamestate: players is a dict keyed by username, winner is a list
       const gs = data as Record<string, unknown>;
-      const gsGame = gs?.game as Record<string, unknown> | undefined;
-      const gameId = gs?.id ?? gs?.gameId ?? gsGame?.id;
-      if (typeof gameId === "string" && !session.crucibleGameId) {
-        session.crucibleGameId = gameId;
-      }
 
-      // Extract player names from first gamestate
-      if (!session.player1 && Array.isArray(gs?.players)) {
-        const players = gs.players as Array<Record<string, unknown>>;
-        if (players[0]) session.player1 = String(players[0].name ?? players[0].username ?? "");
-        if (players[1]) session.player2 = String(players[1].name ?? players[1].username ?? "");
+      // Extract player names from players dict (keys are usernames)
+      if (!session.player1) {
+        const players = gs?.players;
+        if (players && typeof players === "object" && !Array.isArray(players)) {
+          const names = Object.keys(players as Record<string, unknown>);
+          if (names[0]) session.player1 = names[0];
+          if (names[1]) session.player2 = names[1];
+        }
       }
       break;
     }
@@ -103,6 +101,21 @@ function handleInjectEvent(
       const end = data as Record<string, unknown>;
       session.winner = String(end?.winner ?? "");
       finalizeSession("win_detected");
+      break;
+    }
+
+    case "KT_SOCKET_EVENT": {
+      // Extract crucible game ID from updategame/newgame lobby events
+      const ev = data as Record<string, unknown>;
+      const extractedId = ev?.extractedGameId;
+      if (typeof extractedId === "string") {
+        if (currentSession && !currentSession.crucibleGameId) {
+          currentSession.crucibleGameId = extractedId;
+        }
+      }
+      if (currentSession) {
+        currentSession.events.push(event);
+      }
       break;
     }
 
@@ -122,8 +135,8 @@ function handleInjectEvent(
     }
 
     case "KT_STORE_FOUND":
-    case "KT_SOCKET_EVENT":
     case "KT_GAME_CHAT":
+    case "KT_WS_OPEN":
     case "KT_WS_CLOSE":
       if (currentSession) {
         currentSession.events.push(event);
