@@ -33,20 +33,24 @@ function makeSession(): GameSession {
 
 // ─── Session Management ──────────────────────────────────────────────────────
 
-// After a game ends, remember the player set so we can ignore post-game
-// gamestates that keep arriving from the server. Cleared when:
-//  - A gamestate arrives with DIFFERENT players (new game with new opponent)
-//  - A removegame lobby event fires (the finished game was removed from lobby)
+// After a game ends, block new sessions with the same player set until a
+// `handoff` socket event arrives. `handoff` fires exactly once per game when
+// the client is handed off from the lobby server to the game server — it does
+// NOT fire during post-game lobby browsing or rematch dialogs.
+// For a new opponent, the guard is cleared immediately (different player set).
 let postGamePlayerSet: Set<string> | null = null;
+let awaitingHandoff = false;
 
 function ensureSession(playerNames?: string[]): GameSession | null {
-  if (postGamePlayerSet !== null && playerNames && playerNames.length > 0) {
+  if (awaitingHandoff && playerNames && playerNames.length > 0) {
     const sameGame =
+      postGamePlayerSet !== null &&
       playerNames.length === postGamePlayerSet.size &&
       playerNames.every((n) => postGamePlayerSet!.has(n));
-    if (sameGame) return null; // still receiving post-game states for finished game
-    // Different players → new game starting; clear the guard
+    if (sameGame) return null; // post-game / rematch-dialog state, no handoff yet
+    // Different players → new opponent, no need to wait for handoff
     postGamePlayerSet = null;
+    awaitingHandoff = false;
   }
   if (!currentSession) {
     currentSession = makeSession();
@@ -55,13 +59,18 @@ function ensureSession(playerNames?: string[]): GameSession | null {
   return currentSession;
 }
 
+function clearPostGameGuard(): void {
+  postGamePlayerSet = null;
+  awaitingHandoff = false;
+}
+
 function finalizeSession(reason: string): void {
   if (!currentSession) return;
-  // Remember who just played to filter out post-game noise
   const names = [currentSession.player1, currentSession.player2].filter(
     Boolean
   ) as string[];
   postGamePlayerSet = names.length > 0 ? new Set(names) : null;
+  awaitingHandoff = postGamePlayerSet !== null;
 
   currentSession.endTime = Date.now();
   currentSession.gameEndReason = reason;
@@ -130,10 +139,11 @@ function handleInjectEvent(
     case "KT_SOCKET_EVENT": {
       const ev = data as Record<string, unknown>;
 
-      // removegame means the finished game is gone from the lobby — safe to
-      // accept new sessions with the same players (rematch scenario)
-      if (ev?.eventName === "removegame") {
-        postGamePlayerSet = null;
+      // handoff fires exactly once per game when the client's socket is handed
+      // off from lobby server to game server. It's the definitive signal that
+      // a NEW game has started — safe to clear the post-game guard here.
+      if (ev?.eventName === "handoff") {
+        clearPostGameGuard();
       }
 
       // Extract crucible game ID from updategame/newgame lobby events
