@@ -1,0 +1,28 @@
+{
+  "name": "keytracker-extension",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "vite build && npm run build:inject",
+    "build:inject": "esbuild src/inject.ts --bundle --format=iife --target=chrome111 --outfile=dist/inject.js",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@emotion/react": "^11.13.3",
+    "@emotion/styled": "^11.13.0",
+    "@mui/icons-material": "^6.1.6",
+    "@mui/material": "^6.1.6",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.279",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}
