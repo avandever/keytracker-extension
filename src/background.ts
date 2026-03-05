@@ -17,6 +17,7 @@ import type {
   BackgroundState,
   InjectEventType,
   Settings,
+  DebugLogEntry,
 } from "./types";
 
 // ─── Settings ────────────────────────────────────────────────────────────────
@@ -24,6 +25,7 @@ import type {
 const DEFAULT_SETTINGS: Settings = {
   trackerUrl: "https://tracker.ancientbearrepublic.com",
   autoSubmit: false,
+  debugMode: false,
 };
 
 let settings: Settings = { ...DEFAULT_SETTINGS };
@@ -34,6 +36,17 @@ chrome.storage.sync.get(["settings"]).then((result) => {
     settings = { ...DEFAULT_SETTINGS, ...(result.settings as Partial<Settings>) };
   }
 });
+
+// ─── Debug Log ───────────────────────────────────────────────────────────────
+
+const DEBUG_LOG_MAX = 500;
+const debugLog: DebugLogEntry[] = [];
+
+function dlog(type: string, detail: string, guardBlocked: boolean): void {
+  if (!settings.debugMode) return;
+  debugLog.push({ ts: Date.now(), type, detail, guardBlocked });
+  if (debugLog.length > DEBUG_LOG_MAX) debugLog.shift();
+}
 
 // ─── State ──────────────────────────────────────────────────────────────────
 
@@ -51,26 +64,30 @@ function makeSession(): GameSession {
 
 // ─── Session Management ──────────────────────────────────────────────────────
 
-// After a game ends, block new sessions with the same player set until a
-// `handoff` socket event arrives. `handoff` fires exactly once per game when
-// the client is handed off from the lobby server to the game server — it does
-// NOT fire during post-game lobby browsing or rematch dialogs.
-// For a new opponent, the guard is cleared immediately (different player set).
+// After a game ends, block new sessions with the same player set for a
+// grace period (POST_GAME_GUARD_MS). `handoff` never reliably fires, so we
+// use a time-based expiry instead. For a different opponent the guard clears
+// immediately (different player set = new opponent, no risk of double-session).
+const POST_GAME_GUARD_MS = 90_000; // 90 seconds — post-game gamestates last ~55s
+
 let postGamePlayerSet: Set<string> | null = null;
-let awaitingHandoff = false;
+let postGameGuardExpiry: number | null = null;
+
+function guardActive(): boolean {
+  if (postGamePlayerSet === null) return false;
+  if (postGameGuardExpiry !== null && Date.now() > postGameGuardExpiry) {
+    clearPostGameGuard();
+    return false;
+  }
+  return true;
+}
 
 function ensureSession(playerNames?: string[]): GameSession | null {
-  if (awaitingHandoff && playerNames && playerNames.length > 0) {
-    // Block if ANY current player was in the previous game — covers post-game
-    // gamestates that only show a subset of players (e.g. only 1 of 2 players).
-    // Only clear the guard when the player set is completely disjoint (new opponent).
-    const overlapsPostGame =
-      postGamePlayerSet !== null &&
-      playerNames.some((n) => postGamePlayerSet!.has(n));
+  if (guardActive() && playerNames && playerNames.length > 0) {
+    const overlapsPostGame = playerNames.some((n) => postGamePlayerSet!.has(n));
     if (overlapsPostGame) return null; // still in post-game context
-    // No overlap → genuinely new opponent, no need to wait for handoff
-    postGamePlayerSet = null;
-    awaitingHandoff = false;
+    // No overlap → new opponent, clear immediately
+    clearPostGameGuard();
   }
   if (!currentSession) {
     currentSession = makeSession();
@@ -81,7 +98,7 @@ function ensureSession(playerNames?: string[]): GameSession | null {
 
 function clearPostGameGuard(): void {
   postGamePlayerSet = null;
-  awaitingHandoff = false;
+  postGameGuardExpiry = null;
 }
 
 // ─── Log Builder ─────────────────────────────────────────────────────────────
@@ -146,7 +163,7 @@ function finalizeSession(reason: string): void {
     Boolean
   ) as string[];
   postGamePlayerSet = names.length > 0 ? new Set(names) : null;
-  awaitingHandoff = postGamePlayerSet !== null;
+  postGameGuardExpiry = postGamePlayerSet !== null ? Date.now() + POST_GAME_GUARD_MS : null;
 
   currentSession.endTime = Date.now();
   currentSession.gameEndReason = reason;
@@ -199,7 +216,16 @@ function handleInjectEvent(
           ? Object.keys(playersDict as Record<string, unknown>)
           : [];
 
+      const gsWinner = gs?.winner;
+      const hasWinner = Array.isArray(gsWinner) && gsWinner.length > 0;
       const session = ensureSession(playerNames);
+      const blocked = !session;
+      dlog(
+        "KT_GAMESTATE",
+        `players=[${playerNames.join(",")}] winner=${hasWinner ? gsWinner[0] : "none"} ` +
+          `guardActive=${guardActive()} postGameSet=[${postGamePlayerSet ? [...postGamePlayerSet].join(",") : ""}] expiresIn=${postGameGuardExpiry ? Math.round((postGameGuardExpiry - Date.now()) / 1000) + "s" : "none"}`,
+        blocked
+      );
       if (!session) break; // post-game guard — same players as finished game
 
       session.events.push(event);
@@ -224,11 +250,18 @@ function handleInjectEvent(
     }
 
     case "KT_GAME_END": {
-      const session = ensureSession();
-      if (!session) break; // guard active — stale end event
-      session.events.push(event);
       const end = data as Record<string, unknown>;
-      session.winner = String(end?.winner ?? "");
+      // Only finalize an existing session — never create one from a game-end event.
+      // Stale end events (post-game lobby, "X has left") have no session to close.
+      const blocked = !currentSession;
+      dlog(
+        "KT_GAME_END",
+        `winner=${end?.winner} source=${end?.source} hasSession=${!blocked}`,
+        blocked
+      );
+      if (!currentSession) break;
+      currentSession.events.push(event);
+      currentSession.winner = String(end?.winner ?? "");
       finalizeSession("win_detected");
       break;
     }
@@ -240,7 +273,17 @@ function handleInjectEvent(
       // off from lobby server to game server. It's the definitive signal that
       // a NEW game has started — safe to clear the post-game guard here.
       if (ev?.eventName === "handoff") {
+        // Belt-and-suspenders: clear guard early if handoff does fire.
+        // In practice handoff doesn't appear to fire reliably; we use
+        // time-based expiry (POST_GAME_GUARD_MS) as the primary mechanism.
+        dlog("KT_SOCKET_EVENT", "handoff — clearing post-game guard early", false);
         clearPostGameGuard();
+      } else {
+        dlog(
+          "KT_SOCKET_EVENT",
+          `eventName=${ev?.eventName} extractedGameId=${ev?.extractedGameId ?? ""}`,
+          false
+        );
       }
 
       // Extract crucible game ID from updategame/newgame lobby events
@@ -380,6 +423,17 @@ chrome.runtime.onMessage.addListener(
     if (type === "CLEAR_COMPLETED") {
       completedSessions.length = 0;
       if (!currentSession) setBadge("", "#666666");
+      sendResponse({ ok: true });
+      return false;
+    }
+
+    if (type === "GET_DEBUG_LOG") {
+      sendResponse({ entries: [...debugLog] });
+      return false;
+    }
+
+    if (type === "CLEAR_DEBUG_LOG") {
+      debugLog.length = 0;
       sendResponse({ ok: true });
       return false;
     }

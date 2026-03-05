@@ -53,6 +53,15 @@ export interface GameSession {
 export interface Settings {
   trackerUrl: string; // e.g. "https://tracker.ancientbearrepublic.com"
   autoSubmit: boolean;
+  debugMode: boolean;
+}
+
+// One entry in the debug event log (captured regardless of session state)
+export interface DebugLogEntry {
+  ts: number;
+  type: string;
+  detail: string; // human-readable summary of key fields
+  guardBlocked: boolean; // true if ensureSession returned null for this event
 }
 
 // Message from popup → background
@@ -64,7 +73,9 @@ export type BackgroundRequest =
   | { type: "CLEAR_ALL" }
   | { type: "SUBMIT_SESSION"; sessionId: string }
   | { type: "GET_SETTINGS" }
-  | { type: "SAVE_SETTINGS"; settings: Settings };
+  | { type: "SAVE_SETTINGS"; settings: Settings }
+  | { type: "GET_DEBUG_LOG" }
+  | { type: "CLEAR_DEBUG_LOG" };
 
 // Response from background → popup
 export interface BackgroundState {

@@ -184,6 +184,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [draftUrl, setDraftUrl] = useState("");
   const [draftAutoSubmit, setDraftAutoSubmit] = useState(false);
+  const [draftDebugMode, setDraftDebugMode] = useState(false);
 
   const refresh = useCallback(() => {
     setLoading(true);
@@ -209,6 +210,7 @@ export default function App() {
     if (state?.settings) {
       setDraftUrl(state.settings.trackerUrl);
       setDraftAutoSubmit(state.settings.autoSubmit);
+      setDraftDebugMode(state.settings.debugMode ?? false);
     }
   }, [state?.settings]);
 
@@ -245,10 +247,22 @@ export default function App() {
       });
   }
 
+  function handleDownloadDebugLog() {
+    chrome.runtime.sendMessage({ type: "GET_DEBUG_LOG" }).then((resp) => {
+      const entries = (resp as { entries: unknown[] }).entries;
+      downloadJson(entries, `kt_debug_log_${Date.now()}.json`);
+    });
+  }
+
+  function handleClearDebugLog() {
+    chrome.runtime.sendMessage({ type: "CLEAR_DEBUG_LOG" });
+  }
+
   function handleSaveSettings() {
     const newSettings: Settings = {
       trackerUrl: draftUrl.replace(/\/$/, ""), // strip trailing slash
       autoSubmit: draftAutoSubmit,
+      debugMode: draftDebugMode,
     };
     chrome.runtime
       .sendMessage({ type: "SAVE_SETTINGS", settings: newSettings })
@@ -307,17 +321,37 @@ export default function App() {
             fullWidth
             sx={{ mb: 1 }}
           />
-          <Stack direction="row" alignItems="center" justifyContent="space-between">
-            <FormControlLabel
-              control={
-                <Switch
-                  size="small"
-                  checked={draftAutoSubmit}
-                  onChange={(e) => setDraftAutoSubmit(e.target.checked)}
-                />
-              }
-              label={<Typography variant="body2">Auto-submit on game end</Typography>}
-            />
+          <FormControlLabel
+            control={
+              <Switch
+                size="small"
+                checked={draftAutoSubmit}
+                onChange={(e) => setDraftAutoSubmit(e.target.checked)}
+              />
+            }
+            label={<Typography variant="body2">Auto-submit on game end</Typography>}
+          />
+          <FormControlLabel
+            control={
+              <Switch
+                size="small"
+                checked={draftDebugMode}
+                onChange={(e) => setDraftDebugMode(e.target.checked)}
+              />
+            }
+            label={<Typography variant="body2">Debug event logging</Typography>}
+          />
+          <Stack direction="row" spacing={1} justifyContent="flex-end" mt={0.5}>
+            {state?.settings?.debugMode && (
+              <>
+                <Button size="small" variant="outlined" onClick={handleClearDebugLog}>
+                  Clear log
+                </Button>
+                <Button size="small" variant="outlined" startIcon={<DownloadIcon />} onClick={handleDownloadDebugLog}>
+                  Debug log
+                </Button>
+              </>
+            )}
             <Button size="small" variant="contained" onClick={handleSaveSettings}>
               Save
             </Button>
