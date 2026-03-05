@@ -6,8 +6,9 @@
  *  - Accumulate them into GameSession objects (keyed by Crucible game UUID)
  *  - Detect game start (first gamestate event) and game end (KT_GAME_END)
  *  - Respond to popup requests: GET_STATE, DOWNLOAD_SESSION, DOWNLOAD_ALL,
- *    CLEAR_COMPLETED, CLEAR_ALL
+ *    CLEAR_COMPLETED, CLEAR_ALL, SUBMIT_SESSION, GET_SETTINGS, SAVE_SETTINGS
  *  - Update the extension badge with session status
+ *  - Auto-submit completed sessions to the tracker (if enabled)
  */
 
 import type {
@@ -15,7 +16,24 @@ import type {
   SessionEvent,
   BackgroundState,
   InjectEventType,
+  Settings,
 } from "./types";
+
+// ─── Settings ────────────────────────────────────────────────────────────────
+
+const DEFAULT_SETTINGS: Settings = {
+  trackerUrl: "https://tracker.ancientbearrepublic.com",
+  autoSubmit: false,
+};
+
+let settings: Settings = { ...DEFAULT_SETTINGS };
+
+// Load persisted settings at startup
+chrome.storage.sync.get(["settings"]).then((result) => {
+  if (result.settings) {
+    settings = { ...DEFAULT_SETTINGS, ...(result.settings as Partial<Settings>) };
+  }
+});
 
 // ─── State ──────────────────────────────────────────────────────────────────
 
@@ -43,12 +61,14 @@ let awaitingHandoff = false;
 
 function ensureSession(playerNames?: string[]): GameSession | null {
   if (awaitingHandoff && playerNames && playerNames.length > 0) {
-    const sameGame =
+    // Block if ANY current player was in the previous game — covers post-game
+    // gamestates that only show a subset of players (e.g. only 1 of 2 players).
+    // Only clear the guard when the player set is completely disjoint (new opponent).
+    const overlapsPostGame =
       postGamePlayerSet !== null &&
-      playerNames.length === postGamePlayerSet.size &&
-      playerNames.every((n) => postGamePlayerSet!.has(n));
-    if (sameGame) return null; // post-game / rematch-dialog state, no handoff yet
-    // Different players → new opponent, no need to wait for handoff
+      playerNames.some((n) => postGamePlayerSet!.has(n));
+    if (overlapsPostGame) return null; // still in post-game context
+    // No overlap → genuinely new opponent, no need to wait for handoff
     postGamePlayerSet = null;
     awaitingHandoff = false;
   }
@@ -64,6 +84,62 @@ function clearPostGameGuard(): void {
   awaitingHandoff = false;
 }
 
+// ─── Log Builder ─────────────────────────────────────────────────────────────
+
+// Construct a minimal synthetic log from known game data.
+// The tracker's log_to_game() parser requires:
+//   1. "{player} brings {deck} to The Crucible" × 2  (PLAYER_DECK_MATCHER)
+//   2. "{player} won the flip"                         (FIRST_PLAYER_MATCHER)
+//   3. "{winner} has won the game"                     (WIN_MATCHER)
+function buildLog(session: GameSession): string {
+  const p1 = session.player1 ?? "Player1";
+  const p2 = session.player2 ?? "Player2";
+  const winner = session.winner ?? p1;
+  return [
+    `${p1} brings UNSET to The Crucible`,
+    `${p2} brings UNSET to The Crucible`,
+    `${p1} won the flip`,
+    `${winner} has won the game`,
+  ].join("\n");
+}
+
+// ─── Submission ───────────────────────────────────────────────────────────────
+
+async function doSubmit(session: GameSession): Promise<void> {
+  const log = session.finalLog ?? buildLog(session);
+  const body = new URLSearchParams();
+  body.set("log", log);
+  if (session.crucibleGameId) {
+    body.set("crucible_game_id", session.crucibleGameId);
+  }
+  if (session.startTime) {
+    body.set("date", new Date(session.startTime).toISOString());
+  }
+
+  // Map player deck IDs to winner/loser ordering
+  const isP1Winner = session.winner === session.player1;
+  const winnerDeckId = isP1Winner ? session.player1DeckId : session.player2DeckId;
+  const loserDeckId = isP1Winner ? session.player2DeckId : session.player1DeckId;
+  if (winnerDeckId) body.set("winner_deck_id", winnerDeckId);
+  if (loserDeckId) body.set("loser_deck_id", loserDeckId);
+
+  const url = `${settings.trackerUrl}/api/upload_log/v1`;
+  const resp = await fetch(url, { method: "POST", body });
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`HTTP ${resp.status}: ${text.slice(0, 200)}`);
+  }
+
+  const json = (await resp.json()) as Record<string, unknown>;
+  session.submittedAt = Date.now();
+  if (typeof json.game_id === "number") {
+    session.submittedGameId = json.game_id;
+  }
+}
+
+// ─── Session Finalization ─────────────────────────────────────────────────────
+
 function finalizeSession(reason: string): void {
   if (!currentSession) return;
   const names = [currentSession.player1, currentSession.player2].filter(
@@ -74,9 +150,17 @@ function finalizeSession(reason: string): void {
 
   currentSession.endTime = Date.now();
   currentSession.gameEndReason = reason;
+  currentSession.finalLog = buildLog(currentSession);
   completedSessions.push(currentSession);
   currentSession = null;
   setBadge(`${completedSessions.length}`, "#2e7d32"); // green: completed
+
+  if (settings.autoSubmit) {
+    const justFinished = completedSessions[completedSessions.length - 1];
+    doSubmit(justFinished).catch((err: Error) => {
+      justFinished.submitError = err.message;
+    });
+  }
 }
 
 // ─── Badge Helper ────────────────────────────────────────────────────────────
@@ -121,8 +205,21 @@ function handleInjectEvent(
       session.events.push(event);
       session.gamestateSnapshots.push(data);
 
-      if (!session.player1 && playerNames[0]) session.player1 = playerNames[0];
-      if (!session.player2 && playerNames[1]) session.player2 = playerNames[1];
+      if (!session.player1 && playerNames[0]) {
+        session.player1 = playerNames[0];
+        // Extract deck ID from player object: players[username].deck.id
+        const pd = playersDict as Record<string, Record<string, unknown>>;
+        const deck = pd[playerNames[0]]?.deck as Record<string, unknown> | undefined;
+        const did = deck?.id;
+        if (typeof did === "string") session.player1DeckId = did;
+      }
+      if (!session.player2 && playerNames[1]) {
+        session.player2 = playerNames[1];
+        const pd = playersDict as Record<string, Record<string, unknown>>;
+        const deck = pd[playerNames[1]]?.deck as Record<string, unknown> | undefined;
+        const did = deck?.id;
+        if (typeof did === "string") session.player2DeckId = did;
+      }
       break;
     }
 
@@ -153,9 +250,10 @@ function handleInjectEvent(
           // Active session — assign directly
           currentSession.crucibleGameId = extractedId;
         } else if (!currentSession && completedSessions.length > 0) {
-          // Post-game: retroactively patch the last completed session
+          // Post-game: retroactively patch the last completed session,
+          // but only if it looks like a real game (both players known).
           const last = completedSessions[completedSessions.length - 1];
-          if (!last.crucibleGameId) {
+          if (!last.crucibleGameId && last.player1 && last.player2) {
             last.crucibleGameId = extractedId;
           }
         }
@@ -183,7 +281,6 @@ function handleInjectEvent(
 
     case "KT_STORE_FOUND":
     case "KT_GAME_CHAT":
-    case "KT_WS_OPEN":
     case "KT_WS_CLOSE":
       if (currentSession) {
         currentSession.events.push(event);
@@ -216,13 +313,50 @@ chrome.runtime.onMessage.addListener(
       return false; // synchronous response
     }
 
-    // ── Popup requests ──
+    // ── SUBMIT_SESSION (async) ──
+    if (type === "SUBMIT_SESSION") {
+      const id = message.sessionId as string;
+      const session =
+        completedSessions.find((s) => s.sessionId === id) ??
+        (currentSession?.sessionId === id ? currentSession : null);
+      if (!session) {
+        sendResponse({ ok: false, error: "Session not found" });
+        return false;
+      }
+      // Clear previous error so UI shows fresh attempt
+      session.submitError = undefined;
+      doSubmit(session)
+        .then(() =>
+          sendResponse({ ok: true, submittedGameId: session.submittedGameId })
+        )
+        .catch((err: Error) => {
+          session.submitError = err.message;
+          sendResponse({ ok: false, error: err.message });
+        });
+      return true; // keep channel open for async response
+    }
+
+    // ── Popup requests (sync) ──
     if (type === "GET_STATE") {
       const state: BackgroundState = {
         currentSession,
         completedSessions: [...completedSessions],
+        settings,
       };
       sendResponse(state);
+      return false;
+    }
+
+    if (type === "GET_SETTINGS") {
+      sendResponse({ ...settings });
+      return false;
+    }
+
+    if (type === "SAVE_SETTINGS") {
+      const newSettings = message.settings as Settings;
+      settings = { ...DEFAULT_SETTINGS, ...newSettings };
+      chrome.storage.sync.set({ settings });
+      sendResponse({ ok: true });
       return false;
     }
 

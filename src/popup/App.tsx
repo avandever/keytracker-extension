@@ -10,12 +10,19 @@ import {
   Alert,
   IconButton,
   Tooltip,
+  Switch,
+  FormControlLabel,
+  TextField,
+  Collapse,
 } from "@mui/material";
 import DownloadIcon from "@mui/icons-material/Download";
 import DeleteSweepIcon from "@mui/icons-material/DeleteSweep";
 import RefreshIcon from "@mui/icons-material/Refresh";
+import SettingsIcon from "@mui/icons-material/Settings";
 import FiberManualRecordIcon from "@mui/icons-material/FiberManualRecord";
-import type { BackgroundState, GameSession } from "../types";
+import CloudUploadIcon from "@mui/icons-material/CloudUpload";
+import CheckCircleIcon from "@mui/icons-material/CheckCircle";
+import type { BackgroundState, GameSession, Settings } from "../types";
 
 function formatDuration(startMs: number, endMs?: number): string {
   const ms = (endMs ?? Date.now()) - startMs;
@@ -40,9 +47,15 @@ function downloadJson(data: unknown, filename: string): void {
 function SessionCard({
   session,
   isActive,
+  submitting,
+  trackerUrl,
+  onSubmit,
 }: {
   session: GameSession;
   isActive: boolean;
+  submitting: boolean;
+  trackerUrl: string;
+  onSubmit: (sessionId: string) => void;
 }) {
   const eventCount = session.events.length;
   const snapCount = session.gamestateSnapshots.length;
@@ -56,6 +69,10 @@ function SessionCard({
     const filename = `kt_${label}_${new Date(session.startTime).toISOString().slice(0, 10)}.json`;
     downloadJson(session, filename);
   }
+
+  const gameUrl = session.submittedGameId
+    ? `${trackerUrl}/mui/games/${session.submittedGameId}`
+    : null;
 
   return (
     <Box
@@ -87,11 +104,47 @@ function SessionCard({
             />
           )}
         </Stack>
-        <Tooltip title="Download session JSON">
-          <IconButton size="small" onClick={handleDownload}>
-            <DownloadIcon fontSize="small" />
-          </IconButton>
-        </Tooltip>
+        <Stack direction="row" alignItems="center" spacing={0.5}>
+          {/* Submit / status button (completed sessions only) */}
+          {!isActive && (
+            <>
+              {session.submittedAt ? (
+                <Tooltip title={gameUrl ? "View game on tracker" : "Submitted"}>
+                  <Chip
+                    icon={<CheckCircleIcon />}
+                    label={gameUrl ? `#${session.submittedGameId}` : "Submitted"}
+                    size="small"
+                    color="success"
+                    variant="outlined"
+                    component={gameUrl ? "a" : "div"}
+                    href={gameUrl ?? undefined}
+                    target="_blank"
+                    rel="noreferrer"
+                    clickable={!!gameUrl}
+                    sx={{ cursor: gameUrl ? "pointer" : "default" }}
+                  />
+                </Tooltip>
+              ) : submitting ? (
+                <CircularProgress size={16} />
+              ) : (
+                <Tooltip title="Submit to tracker">
+                  <IconButton
+                    size="small"
+                    color="primary"
+                    onClick={() => onSubmit(session.sessionId)}
+                  >
+                    <CloudUploadIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              )}
+            </>
+          )}
+          <Tooltip title="Download session JSON">
+            <IconButton size="small" onClick={handleDownload}>
+              <DownloadIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        </Stack>
       </Stack>
 
       <Stack direction="row" spacing={1} mt={0.5} flexWrap="wrap">
@@ -113,6 +166,12 @@ function SessionCard({
           variant="outlined"
         />
       </Stack>
+
+      {session.submitError && (
+        <Typography variant="caption" color="error" display="block" mt={0.5}>
+          Error: {session.submitError}
+        </Typography>
+      )}
     </Box>
   );
 }
@@ -121,6 +180,10 @@ export default function App() {
   const [state, setState] = useState<BackgroundState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState<Set<string>>(new Set());
+  const [showSettings, setShowSettings] = useState(false);
+  const [draftUrl, setDraftUrl] = useState("");
+  const [draftAutoSubmit, setDraftAutoSubmit] = useState(false);
 
   const refresh = useCallback(() => {
     setLoading(true);
@@ -141,6 +204,14 @@ export default function App() {
     return () => clearInterval(id);
   }, [refresh]);
 
+  // Keep settings draft in sync with loaded state
+  useEffect(() => {
+    if (state?.settings) {
+      setDraftUrl(state.settings.trackerUrl);
+      setDraftAutoSubmit(state.settings.autoSubmit);
+    }
+  }, [state?.settings]);
+
   function handleClearCompleted() {
     chrome.runtime.sendMessage({ type: "CLEAR_COMPLETED" }).then(refresh);
   }
@@ -152,8 +223,42 @@ export default function App() {
     });
   }
 
+  function handleSubmit(sessionId: string) {
+    setSubmitting((prev) => new Set(prev).add(sessionId));
+    chrome.runtime
+      .sendMessage({ type: "SUBMIT_SESSION", sessionId })
+      .then(() => {
+        setSubmitting((prev) => {
+          const next = new Set(prev);
+          next.delete(sessionId);
+          return next;
+        });
+        refresh();
+      })
+      .catch(() => {
+        setSubmitting((prev) => {
+          const next = new Set(prev);
+          next.delete(sessionId);
+          return next;
+        });
+        refresh();
+      });
+  }
+
+  function handleSaveSettings() {
+    const newSettings: Settings = {
+      trackerUrl: draftUrl.replace(/\/$/, ""), // strip trailing slash
+      autoSubmit: draftAutoSubmit,
+    };
+    chrome.runtime
+      .sendMessage({ type: "SAVE_SETTINGS", settings: newSettings })
+      .then(refresh);
+    setShowSettings(false);
+  }
+
   const current = state?.currentSession ?? null;
   const completed = state?.completedSessions ?? [];
+  const trackerUrl = state?.settings?.trackerUrl ?? "https://tracker.ancientbearrepublic.com";
 
   return (
     <Box sx={{ p: 1.5, minWidth: 360, maxWidth: 480 }}>
@@ -163,14 +268,62 @@ export default function App() {
           <Typography variant="h6" sx={{ fontSize: 15, fontWeight: 700 }}>
             KeyTracker
           </Typography>
-          <Chip label="Phase 0" size="small" color="warning" variant="outlined" />
+          <Chip label="Phase 1" size="small" color="primary" variant="outlined" />
         </Stack>
-        <Tooltip title="Refresh">
-          <IconButton size="small" onClick={refresh}>
-            <RefreshIcon fontSize="small" />
-          </IconButton>
-        </Tooltip>
+        <Stack direction="row" spacing={0.5}>
+          <Tooltip title="Settings">
+            <IconButton size="small" onClick={() => setShowSettings((v) => !v)}>
+              <SettingsIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="Refresh">
+            <IconButton size="small" onClick={refresh}>
+              <RefreshIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        </Stack>
       </Stack>
+
+      {/* Settings panel */}
+      <Collapse in={showSettings}>
+        <Box
+          sx={{
+            border: "1px solid",
+            borderColor: "divider",
+            borderRadius: 1,
+            p: 1.5,
+            mb: 1,
+            bgcolor: "action.hover",
+          }}
+        >
+          <Typography variant="overline" display="block" mb={1}>
+            Settings
+          </Typography>
+          <TextField
+            label="Tracker URL"
+            value={draftUrl}
+            onChange={(e) => setDraftUrl(e.target.value)}
+            size="small"
+            fullWidth
+            sx={{ mb: 1 }}
+          />
+          <Stack direction="row" alignItems="center" justifyContent="space-between">
+            <FormControlLabel
+              control={
+                <Switch
+                  size="small"
+                  checked={draftAutoSubmit}
+                  onChange={(e) => setDraftAutoSubmit(e.target.checked)}
+                />
+              }
+              label={<Typography variant="body2">Auto-submit on game end</Typography>}
+            />
+            <Button size="small" variant="contained" onClick={handleSaveSettings}>
+              Save
+            </Button>
+          </Stack>
+        </Box>
+      </Collapse>
 
       {error && (
         <Alert severity="error" sx={{ mb: 1 }}>
@@ -190,7 +343,13 @@ export default function App() {
               <Typography variant="overline" color="primary">
                 Active Game
               </Typography>
-              <SessionCard session={current} isActive />
+              <SessionCard
+                session={current}
+                isActive
+                submitting={false}
+                trackerUrl={trackerUrl}
+                onSubmit={handleSubmit}
+              />
             </>
           ) : (
             <Alert severity="info" sx={{ mb: 1, py: 0.5 }}>
@@ -226,7 +385,14 @@ export default function App() {
               </Stack>
 
               {[...completed].reverse().map((s) => (
-                <SessionCard key={s.sessionId} session={s} isActive={false} />
+                <SessionCard
+                  key={s.sessionId}
+                  session={s}
+                  isActive={false}
+                  submitting={submitting.has(s.sessionId)}
+                  trackerUrl={trackerUrl}
+                  onSubmit={handleSubmit}
+                />
               ))}
             </>
           )}
@@ -241,7 +407,7 @@ export default function App() {
 
       <Divider sx={{ mt: 1.5, mb: 1 }} />
       <Typography variant="caption" color="text.disabled" display="block" textAlign="center">
-        Observer mode — no data sent to server
+        Submits to {trackerUrl.replace(/https?:\/\//, "")}
       </Typography>
     </Box>
   );

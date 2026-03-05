@@ -37,9 +37,22 @@ export interface GameSession {
   events: SessionEvent[];
   // Accumulated gamestate snapshots (subset of events for quick access)
   gamestateSnapshots: unknown[];
-  // Final log array captured at game end
-  finalLog?: string[];
+  // Synthetic log text built at game end (used for submission)
+  finalLog?: string;
   gameEndReason?: string;
+  // Deck IDs (KF UUIDs) extracted from the first gamestate player objects
+  player1DeckId?: string;
+  player2DeckId?: string;
+  // Submission state
+  submittedAt?: number;
+  submittedGameId?: number;
+  submitError?: string;
+}
+
+// User-configurable settings
+export interface Settings {
+  trackerUrl: string; // e.g. "https://tracker.ancientbearrepublic.com"
+  autoSubmit: boolean;
 }
 
 // Message from popup → background
@@ -48,10 +61,14 @@ export type BackgroundRequest =
   | { type: "DOWNLOAD_SESSION"; sessionId: string }
   | { type: "DOWNLOAD_ALL" }
   | { type: "CLEAR_COMPLETED" }
-  | { type: "CLEAR_ALL" };
+  | { type: "CLEAR_ALL" }
+  | { type: "SUBMIT_SESSION"; sessionId: string }
+  | { type: "GET_SETTINGS" }
+  | { type: "SAVE_SETTINGS"; settings: Settings };
 
 // Response from background → popup
 export interface BackgroundState {
   currentSession: GameSession | null;
   completedSessions: GameSession[];
+  settings: Settings;
 }

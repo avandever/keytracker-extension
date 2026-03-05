@@ -4,7 +4,11 @@
   "version": "0.1.0",
   "description": "Captures and submits KeyForge game data from thecrucible.online to Bear Tracks.",
   "permissions": ["storage", "notifications"],
-  "host_permissions": ["*://thecrucible.online/*"],
+  "host_permissions": [
+    "*://thecrucible.online/*",
+    "https://tracker.ancientbearrepublic.com/*",
+    "http://localhost:*/*"
+  ],
   "background": {
     "service_worker": "background.js",
     "type": "module"
