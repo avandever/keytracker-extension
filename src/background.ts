@@ -33,7 +33,13 @@ function makeSession(): GameSession {
 
 // ─── Session Management ──────────────────────────────────────────────────────
 
-function ensureSession(): GameSession {
+// After a game ends, ignore new gamestate events for this many ms.
+// Post-game lobby states keep arriving from the server for ~10s.
+const POST_GAME_COOLDOWN_MS = 20_000;
+let cooldownUntil = 0;
+
+function ensureSession(): GameSession | null {
+  if (Date.now() < cooldownUntil) return null; // post-game cooldown
   if (!currentSession) {
     currentSession = makeSession();
     setBadge("●", "#1565c0"); // blue: in progress
@@ -47,6 +53,7 @@ function finalizeSession(reason: string): void {
   currentSession.gameEndReason = reason;
   completedSessions.push(currentSession);
   currentSession = null;
+  cooldownUntil = Date.now() + POST_GAME_COOLDOWN_MS;
   setBadge(`${completedSessions.length}`, "#2e7d32"); // green: completed
 }
 
@@ -77,6 +84,8 @@ function handleInjectEvent(
 
     case "KT_GAMESTATE": {
       const session = ensureSession();
+      if (!session) break; // post-game cooldown — ignore stale server states
+
       session.events.push(event);
       session.gamestateSnapshots.push(data);
 
@@ -97,6 +106,7 @@ function handleInjectEvent(
 
     case "KT_GAME_END": {
       const session = ensureSession();
+      if (!session) break; // duplicate end event during cooldown
       session.events.push(event);
       const end = data as Record<string, unknown>;
       session.winner = String(end?.winner ?? "");
@@ -110,7 +120,14 @@ function handleInjectEvent(
       const extractedId = ev?.extractedGameId;
       if (typeof extractedId === "string") {
         if (currentSession && !currentSession.crucibleGameId) {
+          // Active session — assign directly
           currentSession.crucibleGameId = extractedId;
+        } else if (!currentSession && completedSessions.length > 0) {
+          // Post-game: retroactively patch the last completed session
+          const last = completedSessions[completedSessions.length - 1];
+          if (!last.crucibleGameId) {
+            last.crucibleGameId = extractedId;
+          }
         }
       }
       if (currentSession) {
