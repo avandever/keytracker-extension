@@ -79,8 +79,9 @@
 
   // Track active game UUID (populated from updategame lobby events)
   let activeGameId: string | null = null;
-  // Track last seen player set size to detect opponent leaving
-  let lastPlayerCount = 0;
+  // Last non-empty player list — used when a gamestate arrives with players={}
+  // (Crucible sends empty players at game end, losing context for who played)
+  let lastKnownPlayers: string[] = [];
 
   function handleSocketIoEvent(eventName: string, payload: unknown): void {
     if (eventName === "gamestate") {
@@ -89,6 +90,9 @@
       const gs = payload as Record<string, unknown>;
       const players = gs?.players as Record<string, unknown> | undefined;
       const playerNames = players ? Object.keys(players) : [];
+      // Keep last known player list so end-of-game messages can use it
+      if (playerNames.length > 0) lastKnownPlayers = playerNames;
+      const effectivePlayers = playerNames.length > 0 ? playerNames : lastKnownPlayers;
 
       // Method 1: winner list directly on gamestate
       const winnerList = gs?.winner;
@@ -120,7 +124,7 @@
           const concedeMatch = /^(.+?) (?:has )?concede/.exec(text);
           if (concedeMatch) {
             const loser = concedeMatch[1].trim();
-            const winner = playerNames.find((n) => n !== loser) ?? "unknown";
+            const winner = effectivePlayers.find((n) => n !== loser) ?? "unknown";
             post("KT_GAME_END", {
               winner,
               loser,
@@ -134,7 +138,7 @@
           const leftMatch = /^(.+?) has left the game/.exec(text);
           if (leftMatch) {
             const leaver = leftMatch[1].trim();
-            const winner = playerNames.find((n) => n !== leaver) ?? "unknown";
+            const winner = effectivePlayers.find((n) => n !== leaver) ?? "unknown";
             post("KT_GAME_END", {
               winner,
               loser: leaver,
@@ -147,16 +151,16 @@
         }
       }
 
-      // Method 3: player count drop — opponent disconnected mid-game
-      if (lastPlayerCount === 2 && playerNames.length === 1) {
+      // Method 3: player count drop 2→1 — opponent disconnected without a message
+      // Note: players={} (empty) also occurs at game end and mid-game during reconnects,
+      // so only trigger on exactly 1 player remaining.
+      if (lastKnownPlayers.length === 2 && playerNames.length === 1) {
         post("KT_GAME_END", {
           winner: playerNames[0],
           source: "player_count_drop",
           gamestate: payload,
         });
       }
-      lastPlayerCount = playerNames.length;
-
     } else if (
       eventName === "updategame" ||
       eventName === "newgame"
