@@ -84,9 +84,12 @@ function guardActive(): boolean {
 
 function ensureSession(playerNames?: string[]): GameSession | null {
   if (guardActive() && playerNames && playerNames.length > 0) {
-    const overlapsPostGame = playerNames.some((n) => postGamePlayerSet!.has(n));
-    if (overlapsPostGame) return null; // still in post-game context
-    // No overlap → new opponent, clear immediately
+    // Block only if EVERY player was in the previous game — handles partial
+    // post-game gamestates (subset of players) while allowing new opponents
+    // immediately (they introduce a player not in the post-game set).
+    const isRematchOrPostGame = playerNames.every((n) => postGamePlayerSet!.has(n));
+    if (isRematchOrPostGame) return null; // still in post-game / rematch context
+    // At least one new player → new opponent, clear immediately
     clearPostGameGuard();
   }
   if (!currentSession) {
