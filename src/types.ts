@@ -40,9 +40,9 @@ export interface GameSession {
   // Synthetic log text built at game end (used for submission)
   finalLog?: string;
   gameEndReason?: string;
-  // Deck IDs (KF UUIDs) extracted from the first gamestate player objects
-  player1DeckId?: string;
-  player2DeckId?: string;
+  // Deck names extracted from pre-game lobby gamestates
+  player1DeckName?: string;
+  player2DeckName?: string;
   // Submission state
   submittedAt?: number;
   submittedGameId?: number;

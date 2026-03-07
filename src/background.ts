@@ -115,9 +115,14 @@ function buildLog(session: GameSession): string {
   const p1 = session.player1 ?? "Player1";
   const p2 = session.player2 ?? "Player2";
   const winner = session.winner ?? p1;
+  // Use captured deck names when available so the backend can look up decks
+  // by name in its local DB. Fall back to "UNSET" (sentinel that skips MV API
+  // lookup) if we didn't capture the name.
+  const d1 = session.player1DeckName ?? "UNSET";
+  const d2 = session.player2DeckName ?? "UNSET";
   return [
-    `${p1} brings UNSET to The Crucible`,
-    `${p2} brings UNSET to The Crucible`,
+    `${p1} brings ${d1} to The Crucible`,
+    `${p2} brings ${d2} to The Crucible`,
     `${p1} won the flip`,
     `${winner} has won the game`,
   ].join("\n");
@@ -136,12 +141,7 @@ async function doSubmit(session: GameSession): Promise<void> {
     body.set("date", new Date(session.startTime).toISOString());
   }
 
-  // Map player deck IDs to winner/loser ordering
-  const isP1Winner = session.winner === session.player1;
-  const winnerDeckId = isP1Winner ? session.player1DeckId : session.player2DeckId;
-  const loserDeckId = isP1Winner ? session.player2DeckId : session.player1DeckId;
-  if (winnerDeckId) body.set("winner_deck_id", winnerDeckId);
-  if (loserDeckId) body.set("loser_deck_id", loserDeckId);
+  // Deck names are embedded in the log lines — the backend parses them from there.
 
   const url = `${settings.trackerUrl}/api/upload_log/v1`;
   const resp = await fetch(url, { method: "POST", body });
@@ -234,20 +234,29 @@ function handleInjectEvent(
       session.events.push(event);
       session.gamestateSnapshots.push(data);
 
+      // Extract the crucible game ID from lobby-phase gamestates (before handoff).
+      // The pre-game gamestate has a top-level `id` field that IS the game UUID.
+      // We prefer this over the lobby socket `updategame` events, which broadcast
+      // ALL active games and can accidentally pick up a different game's UUID.
+      const gsGameId = gs?.id;
+      if (typeof gsGameId === "string" && !session.crucibleGameId) {
+        session.crucibleGameId = gsGameId;
+      }
+
+      const pd = playersDict as Record<string, Record<string, unknown>>;
       if (!session.player1 && playerNames[0]) {
         session.player1 = playerNames[0];
-        // Extract deck ID from player object: players[username].deck.id
-        const pd = playersDict as Record<string, Record<string, unknown>>;
+        // Extract deck name from player object: players[username].deck.name
+        // (The deck object in lobby gamestates has name/selected/status but no UUID)
         const deck = pd[playerNames[0]]?.deck as Record<string, unknown> | undefined;
-        const did = deck?.id;
-        if (typeof did === "string") session.player1DeckId = did;
+        const dname = deck?.name;
+        if (typeof dname === "string") session.player1DeckName = dname;
       }
       if (!session.player2 && playerNames[1]) {
         session.player2 = playerNames[1];
-        const pd = playersDict as Record<string, Record<string, unknown>>;
         const deck = pd[playerNames[1]]?.deck as Record<string, unknown> | undefined;
-        const did = deck?.id;
-        if (typeof did === "string") session.player2DeckId = did;
+        const dname = deck?.name;
+        if (typeof dname === "string") session.player2DeckName = dname;
       }
       break;
     }

@@ -149,14 +149,14 @@ function SessionCard({
 
       <Stack direction="row" spacing={1} mt={0.5} flexWrap="wrap">
         <Chip label={`${p1} vs ${p2}`} size="small" variant="outlined" />
+        {session.player1DeckName && (
+          <Chip label={session.player1DeckName} size="small" variant="outlined" color="primary" />
+        )}
+        {session.player2DeckName && (
+          <Chip label={session.player2DeckName} size="small" variant="outlined" />
+        )}
         <Chip
-          label={`${snapCount} gamestates`}
-          size="small"
-          variant="outlined"
-          color="primary"
-        />
-        <Chip
-          label={`${eventCount} events`}
+          label={`${snapCount} snaps`}
           size="small"
           variant="outlined"
         />
