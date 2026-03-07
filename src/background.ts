@@ -150,6 +150,11 @@ function ensureSession(playerNames?: string[]): GameSession | null {
     clearPostGameGuard();
   }
   if (!currentSession) {
+    // Never start a new session from a gamestate without both players present.
+    // Delta gamestates, spectator broadcasts, and post-game lobby artifacts all
+    // arrive with players={} — requiring 2 known players prevents phantom sessions
+    // from other games that the lobby socket broadcasts to all connected clients.
+    if (!playerNames || playerNames.length < 2) return null;
     currentSession = makeSession();
     setBadge("●", "#1565c0"); // blue: in progress
     schedulePersist();
