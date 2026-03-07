@@ -380,6 +380,97 @@
     });
   }
 
+  // ─── DOM Log Pane Observer ───────────────────────────────────────────────
+  //
+  // The "brings [DeckName] to The Crucible" message is rendered by the
+  // Crucible frontend as an <a> tag linking to the deck's page on
+  // the Master Vault (or keyforgegame.com). The URL contains the KF deck
+  // UUID, which is not available in the Socket.IO gamestate payload.
+  //
+  // We extract it by watching the DOM for these anchor tags.
+  //
+  // URL patterns observed in the wild:
+  //   https://www.keyforgegame.com/deck-details/UUID
+  //   https://keyforgegame.com/deck-details/UUID
+
+  const DECK_LINK_RE =
+    /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+  // Set of UUIDs already reported to avoid duplicates across DOM mutations.
+  const reportedDeckLinks = new Set<string>();
+
+  function extractDeckLinkFromAnchor(a: HTMLAnchorElement): void {
+    const href = a.href || a.getAttribute("href") || "";
+    if (!href.includes("deck-details") && !href.includes("/decks/")) return;
+
+    const match = DECK_LINK_RE.exec(href);
+    if (!match) return;
+
+    const deckId = match[0].toLowerCase();
+    if (reportedDeckLinks.has(deckId)) return;
+    reportedDeckLinks.add(deckId);
+
+    // Try to find the player name from surrounding text.
+    // The log message reads: "[PlayerName] brings [DeckName] to The Crucible"
+    // Walk up to find the nearest text block containing "brings".
+    let playerName: string | null = null;
+    let node: Element | null = a;
+    for (let depth = 0; depth < 6; depth++) {
+      const text = node?.textContent ?? "";
+      const m = /^(\S+)\s+brings\b/.exec(text.trim());
+      if (m) {
+        playerName = m[1];
+        break;
+      }
+      node = node?.parentElement ?? null;
+    }
+
+    post("KT_DECK_LINK", {
+      deckId,
+      deckName: a.textContent?.trim() ?? null,
+      playerName,
+      href,
+    });
+  }
+
+  function scanDomForDeckLinks(): void {
+    document.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((a) => {
+      extractDeckLinkFromAnchor(a);
+    });
+  }
+
+  function startDomObserver(): void {
+    const observer = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        for (const node of m.addedNodes) {
+          if (!(node instanceof Element)) continue;
+          // Check if this node itself is an <a> tag
+          if (node.tagName === "A") {
+            extractDeckLinkFromAnchor(node as HTMLAnchorElement);
+          }
+          // Also search within added subtrees
+          node.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((a) => {
+            extractDeckLinkFromAnchor(a);
+          });
+        }
+      }
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    // Scan any links already present in the DOM (e.g., if we injected late)
+    scanDomForDeckLinks();
+  }
+
+  // Start the observer once the DOM body exists
+  if (document.body) {
+    startDomObserver();
+  } else {
+    document.addEventListener("DOMContentLoaded", startDomObserver, {
+      once: true,
+    });
+  }
+
   // ─── Bootstrap ───────────────────────────────────────────────────────────
 
   interceptWebSocket();

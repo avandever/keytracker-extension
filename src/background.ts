@@ -141,7 +141,13 @@ async function doSubmit(session: GameSession): Promise<void> {
     body.set("date", new Date(session.startTime).toISOString());
   }
 
-  // Deck names are embedded in the log lines — the backend parses them from there.
+  // If we captured deck UUIDs from the DOM, pass them explicitly — more
+  // reliable than name-based lookup from the log.
+  const isP1Winner = session.winner === session.player1;
+  const winnerDeckId = isP1Winner ? session.player1DeckId : session.player2DeckId;
+  const loserDeckId = isP1Winner ? session.player2DeckId : session.player1DeckId;
+  if (winnerDeckId) body.set("winner_deck_id", winnerDeckId);
+  if (loserDeckId) body.set("loser_deck_id", loserDeckId);
 
   const url = `${settings.trackerUrl}/api/upload_log/v1`;
   const resp = await fetch(url, { method: "POST", body });
@@ -329,6 +335,45 @@ function handleInjectEvent(
         const gameId = cg?.id ?? cg?.gameId;
         if (typeof gameId === "string" && !currentSession.crucibleGameId) {
           currentSession.crucibleGameId = gameId;
+        }
+      }
+      break;
+    }
+
+    case "KT_DECK_LINK": {
+      // Deck UUID extracted from DOM "brings [deck] to The Crucible" anchor tag.
+      // Associate with whichever player matches, in either active or the most
+      // recent completed session (link may fire slightly after game end event).
+      const link = data as Record<string, unknown>;
+      const deckId = typeof link?.deckId === "string" ? link.deckId : null;
+      const playerName = typeof link?.playerName === "string" ? link.playerName : null;
+      dlog(
+        "KT_DECK_LINK",
+        `player=${playerName ?? "?"} deckId=${deckId ?? "?"}`,
+        false
+      );
+      if (deckId) {
+        const target =
+          currentSession ??
+          (completedSessions.length > 0
+            ? completedSessions[completedSessions.length - 1]
+            : null);
+        if (target) {
+          if (playerName && playerName === target.player1 && !target.player1DeckId) {
+            target.player1DeckId = deckId;
+            if (currentSession) currentSession.events.push(event);
+          } else if (playerName && playerName === target.player2 && !target.player2DeckId) {
+            target.player2DeckId = deckId;
+            if (currentSession) currentSession.events.push(event);
+          } else if (!playerName) {
+            // No player context — fill in whichever slot is empty
+            if (!target.player1DeckId) {
+              target.player1DeckId = deckId;
+            } else if (!target.player2DeckId) {
+              target.player2DeckId = deckId;
+            }
+            if (currentSession) currentSession.events.push(event);
+          }
         }
       }
       break;

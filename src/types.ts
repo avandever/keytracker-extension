@@ -8,6 +8,7 @@ export type InjectEventType =
   | "KT_GAMESTATE" // Socket.IO "gamestate" event
   | "KT_GAME_END" // game-over detected in log messages
   | "KT_GAME_CHAT" // chat message
+  | "KT_DECK_LINK" // deck UUID extracted from DOM log pane anchor tag
   | "KT_REDUX_STATE" // Redux currentGame state snapshot
   | "KT_STORE_FOUND"; // Redux store successfully located
 
@@ -43,6 +44,9 @@ export interface GameSession {
   // Deck names extracted from pre-game lobby gamestates
   player1DeckName?: string;
   player2DeckName?: string;
+  // Deck UUIDs extracted from DOM log pane anchor tags
+  player1DeckId?: string;
+  player2DeckId?: string;
   // Submission state
   submittedAt?: number;
   submittedGameId?: number;
