@@ -62,6 +62,60 @@ function makeSession(): GameSession {
   };
 }
 
+// ─── Session Persistence ─────────────────────────────────────────────────────
+//
+// MV3 service workers are terminated whenever Chrome decides (idle timeout,
+// memory pressure, etc.) and restart fresh on the next incoming message.
+// Without persistence, a mid-game restart loses all captured event data.
+//
+// We persist currentSession to chrome.storage.local on a debounced write so
+// that on restart it can be restored and event accumulation continues.
+
+const SESSION_STORE_KEY = "kt_current_session";
+const GUARD_STORE_KEY = "kt_post_game_guard";
+
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+function schedulePersist(): void {
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    if (currentSession) {
+      chrome.storage.local.set({ [SESSION_STORE_KEY]: currentSession });
+    } else {
+      chrome.storage.local.remove(SESSION_STORE_KEY);
+    }
+  }, 3000); // batch writes — flush 3 seconds after last change
+}
+
+function clearPersistedSession(): void {
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  chrome.storage.local.remove(SESSION_STORE_KEY);
+}
+
+// Restore session and guard state on service worker startup.
+chrome.storage.local
+  .get([SESSION_STORE_KEY, GUARD_STORE_KEY])
+  .then((result) => {
+    const saved = result[SESSION_STORE_KEY] as GameSession | undefined;
+    if (saved?.sessionId) {
+      currentSession = saved;
+      setBadge("●", "#1565c0");
+    }
+    const guard = result[GUARD_STORE_KEY] as
+      | { players: string[]; expiry: number }
+      | undefined;
+    if (guard && guard.expiry > Date.now()) {
+      postGamePlayerSet = new Set(guard.players);
+      postGameGuardExpiry = guard.expiry;
+    } else if (guard) {
+      chrome.storage.local.remove(GUARD_STORE_KEY);
+    }
+  });
+
 // ─── Session Management ──────────────────────────────────────────────────────
 
 // After a game ends, block new sessions with the same player set for a
@@ -95,6 +149,7 @@ function ensureSession(playerNames?: string[]): GameSession | null {
   if (!currentSession) {
     currentSession = makeSession();
     setBadge("●", "#1565c0"); // blue: in progress
+    schedulePersist();
   }
   return currentSession;
 }
@@ -102,6 +157,7 @@ function ensureSession(playerNames?: string[]): GameSession | null {
 function clearPostGameGuard(): void {
   postGamePlayerSet = null;
   postGameGuardExpiry = null;
+  chrome.storage.local.remove(GUARD_STORE_KEY);
 }
 
 // ─── Log Builder ─────────────────────────────────────────────────────────────
@@ -177,11 +233,23 @@ function finalizeSession(reason: string): void {
   postGamePlayerSet = names.length > 0 ? new Set(names) : null;
   postGameGuardExpiry = postGamePlayerSet !== null ? Date.now() + POST_GAME_GUARD_MS : null;
 
+  // Persist guard state so a service worker restart within the post-game
+  // window still blocks spurious re-sessions for the same players.
+  if (postGamePlayerSet !== null && postGameGuardExpiry !== null) {
+    chrome.storage.local.set({
+      [GUARD_STORE_KEY]: {
+        players: [...postGamePlayerSet],
+        expiry: postGameGuardExpiry,
+      },
+    });
+  }
+
   currentSession.endTime = Date.now();
   currentSession.gameEndReason = reason;
   currentSession.finalLog = buildLog(currentSession);
   completedSessions.push(currentSession);
   currentSession = null;
+  clearPersistedSession(); // game ended — no need to keep session in storage
   setBadge(`${completedSessions.length}`, "#2e7d32"); // green: completed
 
   if (settings.autoSubmit) {
@@ -267,6 +335,7 @@ function handleInjectEvent(
         const dname = deck?.name;
         if (typeof dname === "string") session.player2DeckName = dname;
       }
+      schedulePersist();
       break;
     }
 
@@ -379,6 +448,7 @@ function handleInjectEvent(
           }
         }
       }
+      schedulePersist();
       break;
     }
 
@@ -387,6 +457,7 @@ function handleInjectEvent(
     case "KT_WS_CLOSE":
       if (currentSession) {
         currentSession.events.push(event);
+        schedulePersist();
       }
       break;
   }
@@ -501,6 +572,7 @@ chrome.runtime.onMessage.addListener(
     if (type === "CLEAR_ALL") {
       completedSessions.length = 0;
       currentSession = null;
+      clearPersistedSession();
       setBadge("", "#666666");
       sendResponse({ ok: true });
       return false;
