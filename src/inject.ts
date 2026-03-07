@@ -124,7 +124,9 @@
           const concedeMatch = /^(.+?) (?:has )?concede/.exec(text);
           if (concedeMatch) {
             const loser = concedeMatch[1].trim();
-            const winner = effectivePlayers.find((n) => n !== loser) ?? "unknown";
+            // Use lastKnownPlayers for elimination: the current snapshot may
+            // already be missing the loser (they dropped from the player list).
+            const winner = lastKnownPlayers.find((n) => n !== loser) ?? "unknown";
             post("KT_GAME_END", {
               winner,
               loser,
@@ -138,7 +140,7 @@
           const leftMatch = /^(.+?) has left the game/.exec(text);
           if (leftMatch) {
             const leaver = leftMatch[1].trim();
-            const winner = effectivePlayers.find((n) => n !== leaver) ?? "unknown";
+            const winner = lastKnownPlayers.find((n) => n !== leaver) ?? "unknown";
             post("KT_GAME_END", {
               winner,
               loser: leaver,

@@ -114,7 +114,10 @@ function clearPostGameGuard(): void {
 function buildLog(session: GameSession): string {
   const p1 = session.player1 ?? "Player1";
   const p2 = session.player2 ?? "Player2";
-  const winner = session.winner ?? p1;
+  // If winner is "unknown" (e.g. player left before we resolved the name),
+  // fall back to player1 — the log must name a known player.
+  const rawWinner = session.winner ?? "";
+  const winner = rawWinner && rawWinner !== "unknown" ? rawWinner : p1;
   // Use captured deck names when available so the backend can look up decks
   // by name in its local DB. Fall back to "UNSET" (sentinel that skips MV API
   // lookup) if we didn't capture the name.
