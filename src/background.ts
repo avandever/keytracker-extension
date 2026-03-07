@@ -137,7 +137,10 @@ function guardActive(): boolean {
 }
 
 function ensureSession(playerNames?: string[]): GameSession | null {
-  if (guardActive() && playerNames && playerNames.length > 0) {
+  if (guardActive()) {
+    // Empty player list (players={}) is always a post-game or lobby artifact —
+    // never a real new game starting. Block it while the guard is active.
+    if (!playerNames || playerNames.length === 0) return null;
     // Block only if EVERY player was in the previous game — handles partial
     // post-game gamestates (subset of players) while allowing new opponents
     // immediately (they introduce a player not in the post-game set).
