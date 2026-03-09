@@ -17,7 +17,8 @@ export type InjectEventType =
   | "KT_GAME_CHAT" // chat message
   | "KT_DECK_LINK" // deck UUID extracted from DOM log pane anchor tag
   | "KT_REDUX_STATE" // Redux currentGame state snapshot
-  | "KT_STORE_FOUND"; // Redux store successfully located
+  | "KT_STORE_FOUND" // Redux store successfully located
+  | "KT_LOCAL_USER"; // local player username detected
 
 export interface InjectMessage {
   source: "KT_INJECT";
@@ -65,7 +66,6 @@ export interface GameSession {
 // User-configurable settings
 export interface Settings {
   trackerUrl: string; // e.g. "https://tracker.ancientbearrepublic.com"
-  tcoUsername: string; // Crucible (TCO) username, used as submitter_username
   autoSubmit: boolean;
   debugMode: boolean;
 }

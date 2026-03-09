@@ -25,10 +25,12 @@ import type {
 
 const DEFAULT_SETTINGS: Settings = {
   trackerUrl: "https://tracker.ancientbearrepublic.com",
-  tcoUsername: "",
   autoSubmit: false,
   debugMode: false,
 };
+
+// Local player username detected from the page (DOM / Redux auth state)
+let localPlayer = "";
 
 let settings: Settings = { ...DEFAULT_SETTINGS };
 
@@ -404,7 +406,7 @@ async function doSubmit(session: GameSession): Promise<void> {
     if (timing.length > 0) {
       session.turnTiming = timing;
       const submitter =
-        settings.tcoUsername ||
+        localPlayer ||
         session.winner ||
         session.player1 ||
         session.player2 ||
@@ -665,6 +667,15 @@ function handleInjectEvent(
         }
       }
       schedulePersist();
+      break;
+    }
+
+    case "KT_LOCAL_USER": {
+      const detectedUser = (data as Record<string, unknown>)?.username;
+      if (typeof detectedUser === "string" && detectedUser) {
+        localPlayer = detectedUser;
+        dlog("KT_LOCAL_USER", `detected localPlayer=${detectedUser}`, false);
+      }
       break;
     }
 
