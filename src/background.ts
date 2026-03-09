@@ -331,17 +331,22 @@ function handleInjectEvent(
       const pd = playersDict as Record<string, Record<string, unknown>>;
       if (!session.player1 && playerNames[0]) {
         session.player1 = playerNames[0];
-        // Extract deck name from player object: players[username].deck.name
-        // (The deck object in lobby gamestates has name/selected/status but no UUID)
-        const deck = pd[playerNames[0]]?.deck as Record<string, unknown> | undefined;
-        const dname = deck?.name;
-        if (typeof dname === "string") session.player1DeckName = dname;
       }
       if (!session.player2 && playerNames[1]) {
         session.player2 = playerNames[1];
-        const deck = pd[playerNames[1]]?.deck as Record<string, unknown> | undefined;
-        const dname = deck?.name;
-        if (typeof dname === "string") session.player2DeckName = dname;
+      }
+      // Fill in missing deck names whenever a gamestate has player data.
+      // We check on every gamestate (not just first) because the deck entry
+      // may not be populated yet in the very first two-player gamestate.
+      for (const [pname, slot] of [
+        [session.player1, "player1DeckName"],
+        [session.player2, "player2DeckName"],
+      ] as [string | undefined, keyof GameSession][]) {
+        if (pname && !session[slot] && pd[pname]) {
+          const deck = pd[pname]?.deck as Record<string, unknown> | undefined;
+          const dname = deck?.name;
+          if (typeof dname === "string") (session[slot] as string) = dname;
+        }
       }
       schedulePersist();
       break;
