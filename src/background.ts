@@ -169,22 +169,131 @@ function clearPostGameGuard(): void {
 }
 
 // ─── Log Builder ─────────────────────────────────────────────────────────────
+//
+// The tracker's log_to_game() parser requires these lines to be present:
+//   "{player} brings {deck} to The Crucible" × 2    (PLAYER_DECK_MATCHER)
+//   "{player} won the flip"                          (FIRST_PLAYER_MATCHER)
+//   "{winner} has won the game"                      (WIN_MATCHER)
+//
+// It also extracts (when present):
+//   "{player} chooses {house} as their active house this turn" (HOUSE_CHOICE_MATCHER)
+//   "{player} forges the {color} key, paying {N} Æmber"       (FORGE_MATCHER)
+//
+// We reconstruct the full log from captured gamestates so these richer fields
+// are populated. The "brings" / "won the flip" lines live in early pre-game
+// gamestates we may not have captured, so we inject them from session metadata.
 
-// Construct a minimal synthetic log from known game data.
-// The tracker's log_to_game() parser requires:
-//   1. "{player} brings {deck} to The Crucible" × 2  (PLAYER_DECK_MATCHER)
-//   2. "{player} won the flip"                         (FIRST_PLAYER_MATCHER)
-//   3. "{winner} has won the game"                     (WIN_MATCHER)
-function buildLog(session: GameSession): string {
+// Socket.IO parts can be strings, numbers, or objects with a `name` field.
+function partText(p: unknown): string {
+  if (typeof p === "string") return p;
+  if (typeof p === "number") return String(p);
+  if (typeof p === "object" && p !== null) {
+    return String((p as Record<string, unknown>).name ?? "");
+  }
+  return "";
+}
+
+// Crucible uses internal key identifiers that differ from the backend's expected format.
+// FORGE_MATCHER expects: "forges the Red key, paying 6 Æmber"
+// Socket sends:          "forges the forgedkeyred, paying 6 amber"
+const FORGE_KEY_MAP: Record<string, string> = {
+  forgedkeyred: "Red key",
+  forgedkeyyellow: "Yellow key",
+  forgedkeyblue: "Blue key",
+};
+
+function transformLogLine(line: string): string {
+  return line.replace(
+    /forges the (forgedkey\w+), paying (\d+) amber/,
+    (_m, keyId: string, cost: string) =>
+      `forges the ${FORGE_KEY_MAP[keyId] ?? keyId}, paying ${cost} Æmber`
+  );
+}
+
+// Reconstruct the full game log from captured gamestate snapshots.
+// Each snapshot may have:
+//   messages: [{id, message:[parts]}]       — pre-game list format
+//   messages: {"5": [{message:[parts]}], …} — in-game delta dict format
+function buildFullLog(session: GameSession): string {
   const p1 = session.player1 ?? "Player1";
   const p2 = session.player2 ?? "Player2";
-  // If winner is "unknown" (e.g. player left before we resolved the name),
-  // fall back to player1 — the log must name a known player.
+  const d1 = session.player1DeckName ?? "UNSET";
+  const d2 = session.player2DeckName ?? "UNSET";
   const rawWinner = session.winner ?? "";
   const winner = rawWinner && rawWinner !== "unknown" ? rawWinner : p1;
-  // Use captured deck names when available so the backend can look up decks
-  // by name in its local DB. Fall back to "UNSET" (sentinel that skips MV API
-  // lookup) if we didn't capture the name.
+
+  // Inject header lines — these live in early pre-game gamestates that may
+  // not have been captured (before both players were present).
+  const header = [
+    `${p1} brings ${d1} to The Crucible`,
+    `${p2} brings ${d2} to The Crucible`,
+    `${p1} won the flip`,
+  ];
+
+  const seenKeys = new Set<string>();
+  const bodyLines: string[] = [];
+
+  for (const snapshot of session.gamestateSnapshots) {
+    const gs = snapshot as Record<string, unknown>;
+    const messages = gs?.messages;
+
+    if (Array.isArray(messages)) {
+      // Pre-game list format
+      for (const item of messages) {
+        if (typeof item !== "object" || item === null) continue;
+        const m = item as Record<string, unknown>;
+        const msgId = String(m.id ?? "");
+        if (msgId && seenKeys.has(msgId)) continue;
+        if (msgId) seenKeys.add(msgId);
+        const parts = m.message;
+        if (!Array.isArray(parts)) continue;
+        const text = transformLogLine(parts.map(partText).join("").trim());
+        if (text) bodyLines.push(text);
+      }
+    } else if (typeof messages === "object" && messages !== null) {
+      // In-game delta dict format — sort keys numerically, deduplicate
+      const dict = messages as Record<string, unknown>;
+      const numKeys = Object.keys(dict)
+        .filter((k) => k !== "_t")
+        .sort((a, b) => Number(a) - Number(b));
+
+      for (const k of numKeys) {
+        if (seenKeys.has(k)) continue;
+        seenKeys.add(k);
+        const raw = dict[k];
+        const items = Array.isArray(raw) ? raw : [raw];
+        for (const item of items) {
+          if (typeof item !== "object" || item === null) continue;
+          const parts = (item as Record<string, unknown>).message;
+          if (!Array.isArray(parts)) continue;
+          const text = transformLogLine(parts.map(partText).join("").trim());
+          if (text) bodyLines.push(text);
+        }
+      }
+    }
+  }
+
+  // Ensure the win line is present — may be absent for concede/leave games
+  // where we detect the winner via inference rather than a direct log message.
+  const hasWinLine = bodyLines.some(
+    (l) => l.includes("has won the game") || l.includes("concedes") || l.includes("has conceded")
+  );
+  if (!hasWinLine) {
+    bodyLines.push(`${winner} has won the game`);
+  }
+
+  return [...header, ...bodyLines].join("\n");
+}
+
+function buildLog(session: GameSession): string {
+  if (session.gamestateSnapshots.length > 0) {
+    return buildFullLog(session);
+  }
+  // Fallback: minimal 4-line synthetic log when no gamestates were captured
+  const p1 = session.player1 ?? "Player1";
+  const p2 = session.player2 ?? "Player2";
+  const rawWinner = session.winner ?? "";
+  const winner = rawWinner && rawWinner !== "unknown" ? rawWinner : p1;
   const d1 = session.player1DeckName ?? "UNSET";
   const d2 = session.player2DeckName ?? "UNSET";
   return [
