@@ -19,6 +19,7 @@ import type {
   Settings,
   DebugLogEntry,
   TurnTimingEntry,
+  KeyForgeEvent,
 } from "./types";
 
 // ─── Settings ────────────────────────────────────────────────────────────────
@@ -308,18 +309,26 @@ function buildLog(session: GameSession): string {
   ].join("\n");
 }
 
-// ─── Turn Timing ─────────────────────────────────────────────────────────────
+// ─── Game Events (Turn Timing + Key Forge) ───────────────────────────────────
 //
-// Walk gamestateSnapshots exactly like buildFullLog(), but only process in-game
-// dict-format messages (house choices only happen in-game). For each message that
-// matches "X chooses Y as their active house this turn", record a TurnTimingEntry
-// using the snapshot's `date` field as the timestamp.
+// Single-pass walk over gamestateSnapshots (in-game dict-format only).
+// Avoids turn-counter drift between timing and forge extraction.
 
 const HOUSE_CHOICE_RE = /^(\S+) chooses (\S+) as their active house this turn/;
+const FORGE_EVENT_RE = /^(\S+) forges the (forgedkey\w+), paying (\d+) amber/;
+const FORGE_COLOR_MAP: Record<string, string> = {
+  forgedkeyred: "Red",
+  forgedkeyyellow: "Yellow",
+  forgedkeyblue: "Blue",
+};
 
-function buildTurnTiming(session: GameSession): TurnTimingEntry[] {
+function buildGameEvents(session: GameSession): {
+  turnTiming: TurnTimingEntry[];
+  keyEvents: KeyForgeEvent[];
+} {
   const seenKeys = new Set<string>();
-  const entries: TurnTimingEntry[] = [];
+  const turnTiming: TurnTimingEntry[] = [];
+  const keyEvents: KeyForgeEvent[] = [];
   let turnNumber = 0;
 
   for (const snapshot of session.gamestateSnapshots) {
@@ -346,15 +355,28 @@ function buildTurnTiming(session: GameSession): TurnTimingEntry[] {
         const parts = m.message;
         if (!Array.isArray(parts)) continue;
         const text = parts.map(partText).join("").trim();
-        const match = HOUSE_CHOICE_RE.exec(text);
-        if (match) {
+        const dateStr = typeof m.date === "string" ? m.date : null;
+        const timestamp_ms = dateStr ? new Date(dateStr).getTime() : Date.now();
+
+        const houseMatch = HOUSE_CHOICE_RE.exec(text);
+        if (houseMatch) {
           turnNumber++;
-          const dateStr = typeof m.date === "string" ? m.date : null;
-          const timestamp_ms = dateStr ? new Date(dateStr).getTime() : Date.now();
-          entries.push({
+          turnTiming.push({
             turn: turnNumber,
-            player: match[1],
-            house: match[2],
+            player: houseMatch[1],
+            house: houseMatch[2],
+            timestamp_ms,
+          });
+          continue;
+        }
+
+        const forgeMatch = FORGE_EVENT_RE.exec(text);
+        if (forgeMatch) {
+          keyEvents.push({
+            turn: turnNumber,
+            player: forgeMatch[1],
+            key_color: FORGE_COLOR_MAP[forgeMatch[2]] ?? forgeMatch[2],
+            amber_paid: Number(forgeMatch[3]),
             timestamp_ms,
           });
         }
@@ -362,7 +384,7 @@ function buildTurnTiming(session: GameSession): TurnTimingEntry[] {
     }
   }
 
-  return entries;
+  return { turnTiming, keyEvents };
 }
 
 // ─── Submission ───────────────────────────────────────────────────────────────
@@ -400,11 +422,12 @@ async function doSubmit(session: GameSession): Promise<void> {
     session.submittedGameId = json.game_id;
   }
 
-  // Submit extended data (turn timing) — non-fatal if it fails
+  // Submit extended data (turn timing + key forge events) — non-fatal if it fails
   if (session.crucibleGameId) {
-    const timing = buildTurnTiming(session);
-    if (timing.length > 0) {
-      session.turnTiming = timing;
+    const { turnTiming, keyEvents } = buildGameEvents(session);
+    if (turnTiming.length > 0 || keyEvents.length > 0) {
+      session.turnTiming = turnTiming;
+      session.keyEvents = keyEvents;
       const submitter =
         localPlayer ||
         session.winner ||
@@ -420,7 +443,8 @@ async function doSubmit(session: GameSession): Promise<void> {
           crucible_game_id: session.crucibleGameId,
           submitter_username: submitter,
           extension_version: manifest.version,
-          turn_timing: timing,
+          turn_timing: turnTiming,
+          key_events: keyEvents,
         }),
       }).catch((err: Error) => {
         console.warn("[KT] Extended data upload failed:", err.message);

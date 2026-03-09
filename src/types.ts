@@ -7,6 +7,14 @@ export interface TurnTimingEntry {
   timestamp_ms: number;
 }
 
+export interface KeyForgeEvent {
+  turn: number;
+  player: string;
+  key_color: string;
+  amber_paid: number;
+  timestamp_ms: number;
+}
+
 export type InjectEventType =
   | "KT_INJECT_READY"
   | "KT_WS_OPEN"
@@ -57,6 +65,8 @@ export interface GameSession {
   player2DeckId?: string;
   // Turn timing extracted from gamestate snapshots
   turnTiming?: TurnTimingEntry[];
+  // Key forge events extracted from gamestate snapshots
+  keyEvents?: KeyForgeEvent[];
   // Submission state
   submittedAt?: number;
   submittedGameId?: number;
