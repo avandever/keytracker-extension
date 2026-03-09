@@ -18,6 +18,7 @@ import type {
   InjectEventType,
   Settings,
   DebugLogEntry,
+  TurnTimingEntry,
 } from "./types";
 
 // ─── Settings ────────────────────────────────────────────────────────────────
@@ -304,6 +305,63 @@ function buildLog(session: GameSession): string {
   ].join("\n");
 }
 
+// ─── Turn Timing ─────────────────────────────────────────────────────────────
+//
+// Walk gamestateSnapshots exactly like buildFullLog(), but only process in-game
+// dict-format messages (house choices only happen in-game). For each message that
+// matches "X chooses Y as their active house this turn", record a TurnTimingEntry
+// using the snapshot's `date` field as the timestamp.
+
+const HOUSE_CHOICE_RE = /^(\S+) chooses (\S+) as their active house this turn/;
+
+function buildTurnTiming(session: GameSession): TurnTimingEntry[] {
+  const seenKeys = new Set<string>();
+  const entries: TurnTimingEntry[] = [];
+  let turnNumber = 0;
+
+  for (const snapshot of session.gamestateSnapshots) {
+    const gs = snapshot as Record<string, unknown>;
+    const messages = gs?.messages;
+    if (typeof messages !== "object" || messages === null || Array.isArray(messages)) {
+      continue; // skip pre-game list format
+    }
+
+    // In-game delta dict format — sort keys numerically
+    const dict = messages as Record<string, unknown>;
+    const numKeys = Object.keys(dict)
+      .filter((k) => k !== "_t")
+      .sort((a, b) => Number(a) - Number(b));
+
+    for (const k of numKeys) {
+      if (seenKeys.has(k)) continue;
+      seenKeys.add(k);
+      const raw = dict[k];
+      const items = Array.isArray(raw) ? raw : [raw];
+      for (const item of items) {
+        if (typeof item !== "object" || item === null) continue;
+        const m = item as Record<string, unknown>;
+        const parts = m.message;
+        if (!Array.isArray(parts)) continue;
+        const text = parts.map(partText).join("").trim();
+        const match = HOUSE_CHOICE_RE.exec(text);
+        if (match) {
+          turnNumber++;
+          const dateStr = typeof m.date === "string" ? m.date : null;
+          const timestamp_ms = dateStr ? new Date(dateStr).getTime() : Date.now();
+          entries.push({
+            turn: turnNumber,
+            player: match[1],
+            house: match[2],
+            timestamp_ms,
+          });
+        }
+      }
+    }
+  }
+
+  return entries;
+}
+
 // ─── Submission ───────────────────────────────────────────────────────────────
 
 async function doSubmit(session: GameSession): Promise<void> {
@@ -337,6 +395,29 @@ async function doSubmit(session: GameSession): Promise<void> {
   session.submittedAt = Date.now();
   if (typeof json.game_id === "number") {
     session.submittedGameId = json.game_id;
+  }
+
+  // Submit extended data (turn timing) — non-fatal if it fails
+  if (session.crucibleGameId) {
+    const timing = buildTurnTiming(session);
+    if (timing.length > 0) {
+      session.turnTiming = timing;
+      const submitter = session.winner ?? session.player1 ?? session.player2 ?? "";
+      const extUrl = `${settings.trackerUrl}/api/v2/upload/extended`;
+      const manifest = chrome.runtime.getManifest();
+      fetch(extUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          crucible_game_id: session.crucibleGameId,
+          submitter_username: submitter,
+          extension_version: manifest.version,
+          turn_timing: timing,
+        }),
+      }).catch((err: Error) => {
+        console.warn("[KT] Extended data upload failed:", err.message);
+      });
+    }
   }
 }
 

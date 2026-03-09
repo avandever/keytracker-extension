@@ -1,5 +1,12 @@
 // Shared types for inject ↔ content ↔ background messaging
 
+export interface TurnTimingEntry {
+  turn: number;
+  player: string;
+  house: string;
+  timestamp_ms: number;
+}
+
 export type InjectEventType =
   | "KT_INJECT_READY"
   | "KT_WS_OPEN"
@@ -47,6 +54,8 @@ export interface GameSession {
   // Deck UUIDs extracted from DOM log pane anchor tags
   player1DeckId?: string;
   player2DeckId?: string;
+  // Turn timing extracted from gamestate snapshots
+  turnTiming?: TurnTimingEntry[];
   // Submission state
   submittedAt?: number;
   submittedGameId?: number;
