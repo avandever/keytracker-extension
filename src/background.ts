@@ -535,11 +535,14 @@ function handleInjectEvent(
     }
 
     case "KT_DECK_LINK": {
-      // Deck UUID extracted from DOM "brings [deck] to The Crucible" anchor tag.
+      // Deck UUID and name extracted from DOM "brings [deck] to The Crucible" anchor tag.
+      // The anchor's textContent is the deck name — use it to fill missing deck names
+      // (the "brings" messages live in pre-game gamestates we may not have captured).
       // Associate with whichever player matches, in either active or the most
       // recent completed session (link may fire slightly after game end event).
       const link = data as Record<string, unknown>;
       const deckId = typeof link?.deckId === "string" ? link.deckId : null;
+      const deckName = typeof link?.deckName === "string" ? link.deckName : null;
       const playerName = typeof link?.playerName === "string" ? link.playerName : null;
       dlog(
         "KT_DECK_LINK",
@@ -555,16 +558,20 @@ function handleInjectEvent(
         if (target) {
           if (playerName && playerName === target.player1 && !target.player1DeckId) {
             target.player1DeckId = deckId;
+            if (deckName && !target.player1DeckName) target.player1DeckName = deckName;
             if (currentSession) currentSession.events.push(event);
           } else if (playerName && playerName === target.player2 && !target.player2DeckId) {
             target.player2DeckId = deckId;
+            if (deckName && !target.player2DeckName) target.player2DeckName = deckName;
             if (currentSession) currentSession.events.push(event);
           } else if (!playerName) {
             // No player context — fill in whichever slot is empty
             if (!target.player1DeckId) {
               target.player1DeckId = deckId;
+              if (deckName && !target.player1DeckName) target.player1DeckName = deckName;
             } else if (!target.player2DeckId) {
               target.player2DeckId = deckId;
+              if (deckName && !target.player2DeckName) target.player2DeckName = deckName;
             }
             if (currentSession) currentSession.events.push(event);
           }
