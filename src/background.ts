@@ -25,6 +25,7 @@ import type {
 
 const DEFAULT_SETTINGS: Settings = {
   trackerUrl: "https://tracker.ancientbearrepublic.com",
+  tcoUsername: "",
   autoSubmit: false,
   debugMode: false,
 };
@@ -402,7 +403,12 @@ async function doSubmit(session: GameSession): Promise<void> {
     const timing = buildTurnTiming(session);
     if (timing.length > 0) {
       session.turnTiming = timing;
-      const submitter = session.winner ?? session.player1 ?? session.player2 ?? "";
+      const submitter =
+        settings.tcoUsername ||
+        session.winner ||
+        session.player1 ||
+        session.player2 ||
+        "";
       const extUrl = `${settings.trackerUrl}/api/v2/upload/extended`;
       const manifest = chrome.runtime.getManifest();
       fetch(extUrl, {

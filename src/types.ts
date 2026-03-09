@@ -65,6 +65,7 @@ export interface GameSession {
 // User-configurable settings
 export interface Settings {
   trackerUrl: string; // e.g. "https://tracker.ancientbearrepublic.com"
+  tcoUsername: string; // Crucible (TCO) username, used as submitter_username
   autoSubmit: boolean;
   debugMode: boolean;
 }

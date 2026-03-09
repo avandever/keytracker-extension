@@ -183,6 +183,7 @@ export default function App() {
   const [submitting, setSubmitting] = useState<Set<string>>(new Set());
   const [showSettings, setShowSettings] = useState(false);
   const [draftUrl, setDraftUrl] = useState("");
+  const [draftTcoUsername, setDraftTcoUsername] = useState("");
   const [draftAutoSubmit, setDraftAutoSubmit] = useState(false);
   const [draftDebugMode, setDraftDebugMode] = useState(false);
 
@@ -209,6 +210,7 @@ export default function App() {
   useEffect(() => {
     if (state?.settings) {
       setDraftUrl(state.settings.trackerUrl);
+      setDraftTcoUsername(state.settings.tcoUsername ?? "");
       setDraftAutoSubmit(state.settings.autoSubmit);
       setDraftDebugMode(state.settings.debugMode ?? false);
     }
@@ -261,6 +263,7 @@ export default function App() {
   function handleSaveSettings() {
     const newSettings: Settings = {
       trackerUrl: draftUrl.replace(/\/$/, ""), // strip trailing slash
+      tcoUsername: draftTcoUsername.trim(),
       autoSubmit: draftAutoSubmit,
       debugMode: draftDebugMode,
     };
@@ -317,6 +320,14 @@ export default function App() {
             label="Tracker URL"
             value={draftUrl}
             onChange={(e) => setDraftUrl(e.target.value)}
+            size="small"
+            fullWidth
+            sx={{ mb: 1 }}
+          />
+          <TextField
+            label="Your TCO Username"
+            value={draftTcoUsername}
+            onChange={(e) => setDraftTcoUsername(e.target.value)}
             size="small"
             fullWidth
             sx={{ mb: 1 }}
