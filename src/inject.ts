@@ -291,48 +291,27 @@
   }
 
   // ─── Local User Detection ────────────────────────────────────────────────
+  //
+  // The nav bar renders the logged-in user as:
+  //   <span class="avatar ..."><img class="avatar__image" ...></span>
+  //   <span class="inline-flex items-center leading-none">USERNAME</span>
+  // We find the avatar span and read its next sibling's text content.
 
   let reportedLocalUser = false;
 
-  function extractUsernameFromState(state: Record<string, unknown>): string | null {
-    // Try common Redux auth/account state shapes
-    const auth = state.auth as Record<string, unknown> | undefined;
-    if (auth) {
-      const user = auth.user as Record<string, unknown> | undefined;
-      if (typeof user?.username === "string" && user.username) return user.username;
-      if (typeof user?.name === "string" && user.name) return user.name;
-      if (typeof auth.username === "string" && auth.username) return auth.username;
-    }
-    const account = state.account as Record<string, unknown> | undefined;
-    if (typeof account?.username === "string" && account.username) return account.username;
-    const profile = state.profile as Record<string, unknown> | undefined;
-    if (typeof profile?.username === "string" && profile.username) return profile.username;
-    const userSlice = state.user as Record<string, unknown> | undefined;
-    if (typeof userSlice?.username === "string" && userSlice.username) return userSlice.username;
-    const lobby = state.lobby as Record<string, unknown> | undefined;
-    const lobbyUser = lobby?.user as Record<string, unknown> | undefined;
-    if (typeof lobbyUser?.username === "string" && lobbyUser.username) return lobbyUser.username;
-    return null;
-  }
-
   function extractUsernameFromDom(): string | null {
-    // Nav bar: look for a profile link containing the username
-    // Patterns: /profile/USERNAME  or  /decks?username=USERNAME
-    const allLinks = document.querySelectorAll<HTMLAnchorElement>("a[href]");
-    for (const link of allLinks) {
-      const href = link.getAttribute("href") ?? "";
-      const profileMatch = /\/profile\/([^/?#]+)/.exec(href);
-      if (profileMatch) return decodeURIComponent(profileMatch[1]);
-      const decksMatch = /[?&]username=([^&#]+)/.exec(href);
-      if (decksMatch) return decodeURIComponent(decksMatch[1]);
+    const avatarSpan = document.querySelector<Element>("nav span.avatar");
+    if (avatarSpan) {
+      const sibling = avatarSpan.nextElementSibling;
+      const name = sibling?.textContent?.trim();
+      if (name) return name;
     }
     return null;
   }
 
-  function tryReportLocalUser(state?: Record<string, unknown>): void {
+  function tryReportLocalUser(): void {
     if (reportedLocalUser) return;
-    const username =
-      (state ? extractUsernameFromState(state) : null) ?? extractUsernameFromDom();
+    const username = extractUsernameFromDom();
     if (username) {
       reportedLocalUser = true;
       post("KT_LOCAL_USER", { username });
@@ -353,9 +332,6 @@
     reduxStore = store;
     post("KT_STORE_FOUND", { found: true });
 
-    // Try to detect username immediately from current state
-    tryReportLocalUser(store.getState());
-
     store.subscribe(() => {
       const state = store.getState();
       const currentGame =
@@ -366,9 +342,6 @@
         lastCurrentGame = currentGame;
         post("KT_REDUX_STATE", { currentGame });
       }
-
-      // Keep trying until we find the username (auth state may load async)
-      tryReportLocalUser(state);
     });
   }
 
