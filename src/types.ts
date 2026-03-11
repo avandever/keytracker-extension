@@ -15,6 +15,39 @@ export interface KeyForgeEvent {
   timestamp_ms: number;
 }
 
+export interface HandCardSnapshot {
+  id: string;
+  name: string;
+  type: string; // "creature" | "action" | "upgrade" | "artifact"
+  house: string;
+  amber: number; // cardPrintedAmber
+  can_play: boolean;
+}
+
+export interface BoardCardSnapshot {
+  id: string;
+  name: string;
+  type: string;
+  house: string;
+  power: number; // modifiedPower
+  exhausted: boolean;
+  stunned: boolean;
+  taunt: boolean;
+}
+
+export interface TurnSnapshot {
+  turn: number;
+  player: string; // who chose the house
+  house: string;
+  timestamp_ms: number;
+  local_hand: HandCardSnapshot[]; // local player's hand only
+  boards: Record<string, BoardCardSnapshot[]>; // player name → cardsInPlay
+  amber: Record<string, number>;
+  deck_size: Record<string, number>;
+  discard_size: Record<string, number>;
+  archive_size: Record<string, number>;
+}
+
 export type InjectEventType =
   | "KT_INJECT_READY"
   | "KT_WS_OPEN"
@@ -67,6 +100,8 @@ export interface GameSession {
   turnTiming?: TurnTimingEntry[];
   // Key forge events extracted from gamestate snapshots
   keyEvents?: KeyForgeEvent[];
+  // Per-turn state snapshots captured at house selection
+  turnSnapshots?: TurnSnapshot[];
   // Submission state
   submittedAt?: number;
   submittedGameId?: number;

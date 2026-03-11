@@ -20,6 +20,9 @@ import type {
   DebugLogEntry,
   TurnTimingEntry,
   KeyForgeEvent,
+  HandCardSnapshot,
+  BoardCardSnapshot,
+  TurnSnapshot,
 } from "./types";
 
 // ─── Settings ────────────────────────────────────────────────────────────────
@@ -309,6 +312,116 @@ function buildLog(session: GameSession): string {
   ].join("\n");
 }
 
+// ─── Turn Snapshot Helpers ───────────────────────────────────────────────────
+
+// Parse a Crucible sparse-array object (dict with numeric keys + optional "_t")
+// into a flat array. Mirrors the in-game message dict parsing in buildFullLog.
+function parseSparseArray(obj: unknown): unknown[] {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return [];
+  const dict = obj as Record<string, unknown>;
+  return Object.keys(dict)
+    .filter((k) => k !== "_t")
+    .sort((a, b) => Number(a) - Number(b))
+    .flatMap((k) => {
+      const v = dict[k];
+      return Array.isArray(v) ? v : [v];
+    })
+    .filter(Boolean);
+}
+
+function extractTurnSnapshot(
+  gs: unknown,
+  housePicker: string,
+  house: string,
+  turnNumber: number,
+  timestamp_ms: number
+): TurnSnapshot {
+  const players = (gs as Record<string, unknown>)?.players as
+    | Record<string, unknown>
+    | undefined;
+  const amber: Record<string, number> = {};
+  const deck_size: Record<string, number> = {};
+  const discard_size: Record<string, number> = {};
+  const archive_size: Record<string, number> = {};
+  const boards: Record<string, BoardCardSnapshot[]> = {};
+  let local_hand: HandCardSnapshot[] = [];
+
+  if (players) {
+    for (const [pname, pdata] of Object.entries(players)) {
+      const p = pdata as Record<string, unknown>;
+      const cardPiles = p?.cardPiles as Record<string, unknown> | undefined;
+      const stats = p?.stats as Record<string, unknown> | undefined;
+
+      // Amber: stats.amber is array; index 1 is current value
+      const amberArr = stats?.amber;
+      amber[pname] = Array.isArray(amberArr) ? ((amberArr[1] as number) ?? 0) : 0;
+
+      // Deck size: numDeckCards[1]
+      const numDeck = p?.numDeckCards;
+      deck_size[pname] = Array.isArray(numDeck) ? ((numDeck[1] as number) ?? 0) : 0;
+
+      // Archive size: numArchivesCards[1]
+      const numArchive = p?.numArchivesCards;
+      archive_size[pname] = Array.isArray(numArchive)
+        ? ((numArchive[1] as number) ?? 0)
+        : 0;
+
+      // Discard size
+      discard_size[pname] = parseSparseArray(cardPiles?.discard).length;
+
+      // Board: cardsInPlay (both players visible)
+      const boardCards = parseSparseArray(cardPiles?.cardsInPlay);
+      boards[pname] = boardCards.map((c) => {
+        const card = c as Record<string, unknown>;
+        return {
+          id: String(card.id ?? ""),
+          name: String(card.name ?? ""),
+          type: String(card.type ?? ""),
+          house: String(card.house ?? ""),
+          power: Number(card.modifiedPower ?? 0),
+          exhausted: Boolean(card.exhausted),
+          stunned: Boolean(card.stunned),
+          taunt: Boolean(card.taunt),
+        };
+      });
+
+      // Hand — only for local player; opponent cards are facedown
+      if (pname === localPlayer) {
+        const handCards = parseSparseArray(cardPiles?.hand);
+        local_hand = handCards
+          .filter((c) => {
+            const card = c as Record<string, unknown>;
+            return card.facedown === false;
+          })
+          .map((c) => {
+            const card = c as Record<string, unknown>;
+            return {
+              id: String(card.id ?? ""),
+              name: String(card.name ?? ""),
+              type: String(card.type ?? ""),
+              house: String(card.house ?? ""),
+              amber: Number(card.cardPrintedAmber ?? 0),
+              can_play: Boolean(card.canPlay ?? true),
+            };
+          });
+      }
+    }
+  }
+
+  return {
+    turn: turnNumber,
+    player: housePicker,
+    house,
+    timestamp_ms,
+    local_hand,
+    boards,
+    amber,
+    deck_size,
+    discard_size,
+    archive_size,
+  };
+}
+
 // ─── Game Events (Turn Timing + Key Forge) ───────────────────────────────────
 //
 // Single-pass walk over gamestateSnapshots (in-game dict-format only).
@@ -325,10 +438,12 @@ const FORGE_COLOR_MAP: Record<string, string> = {
 function buildGameEvents(session: GameSession): {
   turnTiming: TurnTimingEntry[];
   keyEvents: KeyForgeEvent[];
+  turnSnapshots: TurnSnapshot[];
 } {
   const seenKeys = new Set<string>();
   const turnTiming: TurnTimingEntry[] = [];
   const keyEvents: KeyForgeEvent[] = [];
+  const turnSnapshots: TurnSnapshot[] = [];
   let turnNumber = 0;
 
   for (const snapshot of session.gamestateSnapshots) {
@@ -367,6 +482,9 @@ function buildGameEvents(session: GameSession): {
             house: houseMatch[2],
             timestamp_ms,
           });
+          turnSnapshots.push(
+            extractTurnSnapshot(gs, houseMatch[1], houseMatch[2], turnNumber, timestamp_ms)
+          );
           continue;
         }
 
@@ -384,7 +502,7 @@ function buildGameEvents(session: GameSession): {
     }
   }
 
-  return { turnTiming, keyEvents };
+  return { turnTiming, keyEvents, turnSnapshots };
 }
 
 // ─── Submission ───────────────────────────────────────────────────────────────
@@ -422,12 +540,13 @@ async function doSubmit(session: GameSession): Promise<void> {
     session.submittedGameId = json.game_id;
   }
 
-  // Submit extended data (turn timing + key forge events) — non-fatal if it fails
+  // Submit extended data (turn timing + key forge events + snapshots) — non-fatal if it fails
   if (session.crucibleGameId) {
-    const { turnTiming, keyEvents } = buildGameEvents(session);
+    const { turnTiming, keyEvents, turnSnapshots } = buildGameEvents(session);
     if (turnTiming.length > 0 || keyEvents.length > 0) {
       session.turnTiming = turnTiming;
       session.keyEvents = keyEvents;
+      session.turnSnapshots = turnSnapshots;
       const submitter =
         localPlayer ||
         session.winner ||
@@ -445,6 +564,7 @@ async function doSubmit(session: GameSession): Promise<void> {
           extension_version: manifest.version,
           turn_timing: turnTiming,
           key_events: keyEvents,
+          turn_snapshots: turnSnapshots,
         }),
       }).catch((err: Error) => {
         console.warn("[KT] Extended data upload failed:", err.message);
