@@ -12,7 +12,6 @@ import {
   Tooltip,
   Switch,
   FormControlLabel,
-  TextField,
   Collapse,
 } from "@mui/material";
 import DownloadIcon from "@mui/icons-material/Download";
@@ -44,17 +43,17 @@ function downloadJson(data: unknown, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
+const TRACKER_URL = "https://tracker.ancientbearrepublic.com";
+
 function SessionCard({
   session,
   isActive,
   submitting,
-  trackerUrl,
   onSubmit,
 }: {
   session: GameSession;
   isActive: boolean;
   submitting: boolean;
-  trackerUrl: string;
   onSubmit: (sessionId: string) => void;
 }) {
   const eventCount = session.events.length;
@@ -71,7 +70,7 @@ function SessionCard({
   }
 
   const gameUrl = session.submittedGameId
-    ? `${trackerUrl}/mui/games/${session.submittedGameId}`
+    ? `${TRACKER_URL}/mui/games/${session.submittedGameId}`
     : null;
 
   return (
@@ -182,7 +181,6 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState<Set<string>>(new Set());
   const [showSettings, setShowSettings] = useState(false);
-  const [draftUrl, setDraftUrl] = useState("");
   const [draftAutoSubmit, setDraftAutoSubmit] = useState(false);
   const [draftDebugMode, setDraftDebugMode] = useState(false);
 
@@ -208,7 +206,6 @@ export default function App() {
   // Keep settings draft in sync with loaded state
   useEffect(() => {
     if (state?.settings) {
-      setDraftUrl(state.settings.trackerUrl);
       setDraftAutoSubmit(state.settings.autoSubmit);
       setDraftDebugMode(state.settings.debugMode ?? false);
     }
@@ -260,7 +257,6 @@ export default function App() {
 
   function handleSaveSettings() {
     const newSettings: Settings = {
-      trackerUrl: draftUrl.replace(/\/$/, ""), // strip trailing slash
       autoSubmit: draftAutoSubmit,
       debugMode: draftDebugMode,
     };
@@ -272,7 +268,6 @@ export default function App() {
 
   const current = state?.currentSession ?? null;
   const completed = state?.completedSessions ?? [];
-  const trackerUrl = state?.settings?.trackerUrl ?? "https://tracker.ancientbearrepublic.com";
 
   return (
     <Box sx={{ p: 1.5, minWidth: 360, maxWidth: 480 }}>
@@ -282,7 +277,7 @@ export default function App() {
           <Typography variant="h6" sx={{ fontSize: 15, fontWeight: 700 }}>
             KeyTracker
           </Typography>
-          <Chip label="Phase 1" size="small" color="primary" variant="outlined" />
+          <Chip label="v1.0" size="small" color="primary" variant="outlined" />
         </Stack>
         <Stack direction="row" spacing={0.5}>
           <Tooltip title="Settings">
@@ -313,14 +308,6 @@ export default function App() {
           <Typography variant="overline" display="block" mb={1}>
             Settings
           </Typography>
-          <TextField
-            label="Tracker URL"
-            value={draftUrl}
-            onChange={(e) => setDraftUrl(e.target.value)}
-            size="small"
-            fullWidth
-            sx={{ mb: 1 }}
-          />
           <FormControlLabel
             control={
               <Switch
@@ -381,7 +368,6 @@ export default function App() {
                 session={current}
                 isActive
                 submitting={false}
-                trackerUrl={trackerUrl}
                 onSubmit={handleSubmit}
               />
             </>
@@ -424,7 +410,6 @@ export default function App() {
                   session={s}
                   isActive={false}
                   submitting={submitting.has(s.sessionId)}
-                  trackerUrl={trackerUrl}
                   onSubmit={handleSubmit}
                 />
               ))}
@@ -441,7 +426,7 @@ export default function App() {
 
       <Divider sx={{ mt: 1.5, mb: 1 }} />
       <Typography variant="caption" color="text.disabled" display="block" textAlign="center">
-        Submits to {trackerUrl.replace(/https?:\/\//, "")}
+        Submits to tracker.ancientbearrepublic.com
       </Typography>
     </Box>
   );

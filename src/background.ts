@@ -27,9 +27,10 @@ import type {
 
 // ─── Settings ────────────────────────────────────────────────────────────────
 
+const TRACKER_URL = "https://tracker.ancientbearrepublic.com";
+
 const DEFAULT_SETTINGS: Settings = {
-  trackerUrl: "https://tracker.ancientbearrepublic.com",
-  autoSubmit: false,
+  autoSubmit: true,
   debugMode: false,
 };
 
@@ -526,7 +527,7 @@ async function doSubmit(session: GameSession): Promise<void> {
   if (winnerDeckId) body.set("winner_deck_id", winnerDeckId);
   if (loserDeckId) body.set("loser_deck_id", loserDeckId);
 
-  const url = `${settings.trackerUrl}/api/upload_log/v1`;
+  const url = `${TRACKER_URL}/api/upload_log/v1`;
   const resp = await fetch(url, { method: "POST", body });
 
   if (!resp.ok) {
@@ -553,7 +554,7 @@ async function doSubmit(session: GameSession): Promise<void> {
         session.player1 ||
         session.player2 ||
         "";
-      const extUrl = `${settings.trackerUrl}/api/v2/upload/extended`;
+      const extUrl = `${TRACKER_URL}/api/v2/upload/extended`;
       const manifest = chrome.runtime.getManifest();
       fetch(extUrl, {
         method: "POST",

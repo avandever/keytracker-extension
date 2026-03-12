@@ -110,7 +110,6 @@ export interface GameSession {
 
 // User-configurable settings
 export interface Settings {
-  trackerUrl: string; // e.g. "https://tracker.ancientbearrepublic.com"
   autoSubmit: boolean;
   debugMode: boolean;
 }

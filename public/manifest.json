@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "KeyTracker",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Captures and submits KeyForge game data from thecrucible.online to Bear Tracks.",
-  "permissions": ["storage", "notifications"],
+  "homepage_url": "https://tracker.ancientbearrepublic.com",
+  "privacy_policy": "https://tracker.ancientbearrepublic.com/privacy",
+  "permissions": ["storage"],
   "host_permissions": [
     "*://thecrucible.online/*",
-    "https://tracker.ancientbearrepublic.com/*",
-    "http://localhost:*/*"
+    "https://tracker.ancientbearrepublic.com/*"
   ],
   "background": {
     "service_worker": "background.js",
