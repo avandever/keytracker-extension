@@ -3,3 +3,4 @@ dist/
 dist
 *.local
 .DS_Store
+keytracker-v*.zip
