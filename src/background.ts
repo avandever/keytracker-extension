@@ -62,6 +62,27 @@ function dlog(type: string, detail: string, guardBlocked: boolean): void {
 let currentSession: GameSession | null = null;
 const completedSessions: GameSession[] = [];
 
+// ─── Storage Restore Guard ───────────────────────────────────────────────────
+//
+// MV3 service workers restart with no state. chrome.storage.local.get() is
+// async — events arriving before it resolves see guardActive()=false and can
+// create phantom sessions from post-game gamestates. We buffer all incoming
+// events until the Promise resolves, then drain them in order.
+
+let storageRestored = false;
+const pendingEvents: Array<{
+  type: InjectEventType;
+  timestamp: number;
+  data: unknown;
+}> = [];
+
+function drainPendingEvents(): void {
+  const toProcess = pendingEvents.splice(0);
+  for (const e of toProcess) {
+    handleInjectEvent(e.type, e.timestamp, e.data);
+  }
+}
+
 function makeSession(): GameSession {
   return {
     sessionId: `kt_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
@@ -123,6 +144,8 @@ chrome.storage.local
     } else if (guard) {
       chrome.storage.local.remove(GUARD_STORE_KEY);
     }
+    storageRestored = true;
+    drainPendingEvents();
   });
 
 // ─── Session Management ──────────────────────────────────────────────────────
@@ -229,7 +252,13 @@ function buildFullLog(session: GameSession): string {
   const d1 = session.player1DeckName ?? "UNSET";
   const d2 = session.player2DeckName ?? "UNSET";
   const rawWinner = session.winner ?? "";
-  const winner = rawWinner && rawWinner !== "unknown" ? rawWinner : p1;
+  const rawLoser = session.loser ?? "";
+  const winner =
+    rawWinner && rawWinner !== "unknown"
+      ? rawWinner
+      : rawLoser && rawLoser !== "unknown"
+        ? rawLoser === p1 ? p2 : p1  // winner is the one who didn't leave
+        : p1;                          // last resort — can't determine
 
   // Inject header lines — these live in early pre-game gamestates that may
   // not have been captured (before both players were present).
@@ -302,7 +331,13 @@ function buildLog(session: GameSession): string {
   const p1 = session.player1 ?? "Player1";
   const p2 = session.player2 ?? "Player2";
   const rawWinner = session.winner ?? "";
-  const winner = rawWinner && rawWinner !== "unknown" ? rawWinner : p1;
+  const rawLoser = session.loser ?? "";
+  const winner =
+    rawWinner && rawWinner !== "unknown"
+      ? rawWinner
+      : rawLoser && rawLoser !== "unknown"
+        ? rawLoser === p1 ? p2 : p1
+        : p1;
   const d1 = session.player1DeckName ?? "UNSET";
   const d2 = session.player2DeckName ?? "UNSET";
   return [
@@ -605,9 +640,20 @@ function finalizeSession(reason: string): void {
 
   if (settings.autoSubmit) {
     const justFinished = completedSessions[completedSessions.length - 1];
-    doSubmit(justFinished).catch((err: Error) => {
-      justFinished.submitError = err.message;
-    });
+    const canDetermineWinner =
+      (justFinished.winner && justFinished.winner !== "unknown") ||
+      (justFinished.loser && justFinished.loser !== "unknown");
+    if (!canDetermineWinner) {
+      dlog(
+        "SKIP_SUBMIT",
+        `session ${justFinished.sessionId} — winner and loser both unknown, not auto-submitting`,
+        false
+      );
+    } else {
+      doSubmit(justFinished).catch((err: Error) => {
+        justFinished.submitError = err.message;
+      });
+    }
   }
 }
 
@@ -625,6 +671,13 @@ function handleInjectEvent(
   timestamp: number,
   data: unknown
 ): void {
+  // Buffer events until storage restore completes so guardActive() reflects
+  // the correct post-game state and doesn't create phantom sessions.
+  if (!storageRestored) {
+    pendingEvents.push({ type, timestamp, data });
+    return;
+  }
+
   const event: SessionEvent = { type, timestamp, data };
 
   switch (type) {
@@ -661,6 +714,29 @@ function handleInjectEvent(
 
       session.events.push(event);
       session.gamestateSnapshots.push(data);
+
+      // Detect game start from house-choice messages in in-game dict-format messages.
+      // Any "X chooses Y as their active house" line confirms the game is underway.
+      if (!session.gameStarted) {
+        const msgs = gs?.messages;
+        if (typeof msgs === "object" && msgs !== null && !Array.isArray(msgs)) {
+          const dict = msgs as Record<string, unknown>;
+          outer: for (const [k, raw] of Object.entries(dict)) {
+            if (k === "_t") continue;
+            const items = Array.isArray(raw) ? raw : [raw];
+            for (const item of items) {
+              if (typeof item !== "object" || item === null) continue;
+              const parts = (item as Record<string, unknown>).message;
+              if (!Array.isArray(parts)) continue;
+              const text = parts.map(partText).join("").trim();
+              if (/chooses .+ as their active house/.test(text)) {
+                session.gameStarted = true;
+                break outer;
+              }
+            }
+          }
+        }
+      }
 
       // Extract the crucible game ID from lobby-phase gamestates (before handoff).
       // The pre-game gamestate has a top-level `id` field that IS the game UUID.
@@ -708,6 +784,7 @@ function handleInjectEvent(
       if (!currentSession) break;
       currentSession.events.push(event);
       currentSession.winner = String(end?.winner ?? "");
+      currentSession.loser = String(end?.loser ?? "");
       finalizeSession("win_detected");
       break;
     }
@@ -724,6 +801,7 @@ function handleInjectEvent(
         // time-based expiry (POST_GAME_GUARD_MS) as the primary mechanism.
         dlog("KT_SOCKET_EVENT", "handoff — clearing post-game guard early", false);
         clearPostGameGuard();
+        if (currentSession) currentSession.gameStarted = true;
       } else {
         dlog(
           "KT_SOCKET_EVENT",
@@ -732,19 +810,16 @@ function handleInjectEvent(
         );
       }
 
-      // Extract crucible game ID from updategame/newgame lobby events
+      // Extract crucible game ID from updategame/newgame lobby events.
+      // We only retroactively patch completed sessions — never assign to the
+      // current session, because updategame broadcasts ALL active games on the
+      // lobby socket and can accidentally pick up a different game's UUID.
+      // (The KT_GAMESTATE handler already assigns gs.id from actual gamestates.)
       const extractedId = ev?.extractedGameId;
-      if (typeof extractedId === "string") {
-        if (currentSession && !currentSession.crucibleGameId) {
-          // Active session — assign directly
-          currentSession.crucibleGameId = extractedId;
-        } else if (!currentSession && completedSessions.length > 0) {
-          // Post-game: retroactively patch the last completed session,
-          // but only if it looks like a real game (both players known).
-          const last = completedSessions[completedSessions.length - 1];
-          if (!last.crucibleGameId && last.player1 && last.player2) {
-            last.crucibleGameId = extractedId;
-          }
+      if (typeof extractedId === "string" && !currentSession && completedSessions.length > 0) {
+        const last = completedSessions[completedSessions.length - 1];
+        if (!last.crucibleGameId && last.player1 && last.player2) {
+          last.crucibleGameId = extractedId;
         }
       }
       if (currentSession) {
@@ -826,12 +901,34 @@ function handleInjectEvent(
 
     case "KT_STORE_FOUND":
     case "KT_GAME_CHAT":
-    case "KT_WS_CLOSE":
       if (currentSession) {
         currentSession.events.push(event);
         schedulePersist();
       }
       break;
+
+    case "KT_WS_CLOSE": {
+      dlog(
+        "KT_WS_CLOSE",
+        `hasSession=${!!currentSession} gameStarted=${currentSession?.gameStarted ?? false}`,
+        false
+      );
+      if (currentSession && !currentSession.gameStarted) {
+        // Lobby WS closed before game started — session was never a real game
+        dlog(
+          "DISCARD",
+          `session ${currentSession.sessionId} discarded — WS closed before game started`,
+          false
+        );
+        currentSession = null;
+        clearPersistedSession();
+        setBadge("", "#666666");
+      } else if (currentSession) {
+        currentSession.events.push(event);
+        schedulePersist();
+      }
+      break;
+    }
   }
 }
 

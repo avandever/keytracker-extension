@@ -84,6 +84,8 @@ export interface GameSession {
   player1?: string;
   player2?: string;
   winner?: string;
+  loser?: string;
+  gameStarted?: boolean;
   events: SessionEvent[];
   // Accumulated gamestate snapshots (subset of events for quick access)
   gamestateSnapshots: unknown[];
