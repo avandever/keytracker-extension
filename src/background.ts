@@ -415,6 +415,7 @@ function extractTurnSnapshot(
           type: String(card.type ?? ""),
           house: String(card.printedHouse ?? ""),
           power: Number(card.modifiedPower ?? 0),
+          amber: Number(card.cardPrintedAmber ?? 0),
           exhausted: Boolean(card.exhausted),
           stunned: Boolean(card.stunned),
           taunt: Boolean(card.taunt),
