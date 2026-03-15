@@ -787,11 +787,24 @@ function handleInjectEvent(
       }
 
       const pd = playersDict as Record<string, Record<string, unknown>>;
-      if (!session.player1 && playerNames[0]) {
-        session.player1 = playerNames[0];
-      }
-      if (!session.player2 && playerNames[1]) {
-        session.player2 = playerNames[1];
+      // Before the game starts, the lobby can change as players join/leave.
+      // Keep player names in sync with the current gamestate so we capture the
+      // actual players, not whoever happened to be in the lobby first.
+      // Once the game starts (first house-choice seen), lock player names in place.
+      if (!session.gameStarted && playerNames.length >= 2) {
+        if (playerNames[0] !== session.player1) {
+          session.player1 = playerNames[0];
+          session.player1DeckId = undefined;
+          session.player1DeckName = undefined;
+        }
+        if (playerNames[1] !== session.player2) {
+          session.player2 = playerNames[1];
+          session.player2DeckId = undefined;
+          session.player2DeckName = undefined;
+        }
+      } else {
+        if (!session.player1 && playerNames[0]) session.player1 = playerNames[0];
+        if (!session.player2 && playerNames[1]) session.player2 = playerNames[1];
       }
       // Fill in missing deck names whenever a gamestate has player data.
       // We check on every gamestate (not just first) because the deck entry
