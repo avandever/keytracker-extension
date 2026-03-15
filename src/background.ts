@@ -479,6 +479,7 @@ function buildGameEvents(session: GameSession): {
   turnTiming: TurnTimingEntry[];
   keyEvents: KeyForgeEvent[];
   turnSnapshots: TurnSnapshot[];
+  localPlayer: string;
 } {
   const snaps = session.gamestateSnapshots;
   const seenKeys = new Set<string>();
@@ -625,7 +626,24 @@ function buildGameEvents(session: GameSession): {
     }
   }
 
-  return { turnTiming, keyEvents, turnSnapshots };
+  // Determine effective local player: the player with facedown:false hand cards.
+  // Computed here so doSubmit can use the same value for submitter_username.
+  let detectedLocalPlayer = localPlayer;
+  if (!detectedLocalPlayer) {
+    for (const [pname, cpMap] of playerCardPile.entries()) {
+      const cdMap = playerCardData.get(pname)!;
+      if (
+        [...cpMap.entries()].some(
+          ([id, pile]) => pile === "hand" && cdMap.get(id)?.facedown === false
+        )
+      ) {
+        detectedLocalPlayer = pname;
+        break;
+      }
+    }
+  }
+
+  return { turnTiming, keyEvents, turnSnapshots, localPlayer: detectedLocalPlayer };
 }
 
 // ─── Submission ───────────────────────────────────────────────────────────────
@@ -665,14 +683,15 @@ async function doSubmit(session: GameSession): Promise<void> {
 
   // Submit extended data (turn timing + key forge events + snapshots) — non-fatal if it fails
   if (session.crucibleGameId) {
-    const { turnTiming, keyEvents, turnSnapshots } = buildGameEvents(session);
+    const { turnTiming, keyEvents, turnSnapshots, localPlayer: detectedLocal } = buildGameEvents(session);
     if (turnTiming.length > 0 || keyEvents.length > 0) {
       session.turnTiming = turnTiming;
       session.keyEvents = keyEvents;
       session.turnSnapshots = turnSnapshots;
+      // Use the player detected from card tracking (facedown:false hand cards),
+      // which is more reliable than the global localPlayer or session.winner fallback.
       const submitter =
-        localPlayer ||
-        session.winner ||
+        detectedLocal ||
         session.player1 ||
         session.player2 ||
         "";
