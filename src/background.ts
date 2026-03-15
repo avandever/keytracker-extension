@@ -365,12 +365,49 @@ function parseSparseArray(obj: unknown): unknown[] {
     .filter(Boolean);
 }
 
+// Returns true if a gamestate has full player data (cardPiles present on any player).
+function isRichGamestate(gs: unknown): boolean {
+  const players = (gs as Record<string, unknown>)?.players as Record<string, unknown> | undefined;
+  if (!players) return false;
+  return Object.values(players).some(
+    (p) => (p as Record<string, unknown>)?.cardPiles !== undefined
+  );
+}
+
+// After finding a house-choice message at snaps[afterIndex], return the next
+// gamestate that has full card data. Falls back to the original if none found.
+function findNextRichGamestate(snaps: unknown[], afterIndex: number): unknown {
+  for (let j = afterIndex + 1; j < snaps.length; j++) {
+    if (isRichGamestate(snaps[j])) return snaps[j];
+  }
+  return snaps[afterIndex];
+}
+
+// Detect local player by finding the player whose hand contains non-facedown
+// cards. Falls back to "" if no rich gamestate has visible hand cards.
+function detectLocalPlayer(snaps: unknown[]): string {
+  for (const snap of snaps) {
+    const players = (snap as Record<string, unknown>)?.players as Record<string, unknown> | undefined;
+    if (!players) continue;
+    for (const [pname, pdata] of Object.entries(players)) {
+      const cardPiles = (pdata as Record<string, unknown>)?.cardPiles as Record<string, unknown> | undefined;
+      if (!cardPiles) continue;
+      const hasVisible = parseSparseArray(cardPiles.hand).some(
+        (c) => (c as Record<string, unknown>).facedown === false
+      );
+      if (hasVisible) return pname;
+    }
+  }
+  return "";
+}
+
 function extractTurnSnapshot(
   gs: unknown,
   housePicker: string,
   house: string,
   turnNumber: number,
-  timestamp_ms: number
+  timestamp_ms: number,
+  effectiveLocalPlayer: string
 ): TurnSnapshot {
   const players = (gs as Record<string, unknown>)?.players as
     | Record<string, unknown>
@@ -392,8 +429,8 @@ function extractTurnSnapshot(
       if (turnNumber === 1) {
         dlog("SNAPSHOT_DEBUG", JSON.stringify({
           player: pname,
-          isLocalPlayer: pname === localPlayer,
-          localPlayerVar: localPlayer,
+          isLocalPlayer: pname === effectiveLocalPlayer,
+          localPlayerVar: effectiveLocalPlayer,
           playerTopKeys: Object.keys(p),
           cardPilesKeys: cardPiles ? Object.keys(cardPiles) : null,
           statsKeys: stats ? Object.keys(stats) : null,
@@ -447,7 +484,7 @@ function extractTurnSnapshot(
       });
 
       // Hand — only for local player; opponent cards are facedown
-      if (pname === localPlayer) {
+      if (pname === effectiveLocalPlayer) {
         const handCards = parseSparseArray(cardPiles?.hand);
         local_hand = handCards
           .filter((c) => {
@@ -501,13 +538,16 @@ function buildGameEvents(session: GameSession): {
   keyEvents: KeyForgeEvent[];
   turnSnapshots: TurnSnapshot[];
 } {
+  const snaps = session.gamestateSnapshots;
+  const effectiveLocalPlayer = localPlayer || detectLocalPlayer(snaps);
   const seenKeys = new Set<string>();
   const turnTiming: TurnTimingEntry[] = [];
   const keyEvents: KeyForgeEvent[] = [];
   const turnSnapshots: TurnSnapshot[] = [];
   let turnNumber = 0;
 
-  for (const snapshot of session.gamestateSnapshots) {
+  for (let snapIdx = 0; snapIdx < snaps.length; snapIdx++) {
+    const snapshot = snaps[snapIdx];
     const gs = snapshot as Record<string, unknown>;
     const messages = gs?.messages;
     if (typeof messages !== "object" || messages === null || Array.isArray(messages)) {
@@ -544,7 +584,11 @@ function buildGameEvents(session: GameSession): {
             timestamp_ms,
           });
           turnSnapshots.push(
-            extractTurnSnapshot(gs, houseMatch[1], houseMatch[2], turnNumber, timestamp_ms)
+            extractTurnSnapshot(
+              findNextRichGamestate(snaps, snapIdx),
+              houseMatch[1], houseMatch[2], turnNumber, timestamp_ms,
+              effectiveLocalPlayer
+            )
           );
           continue;
         }
