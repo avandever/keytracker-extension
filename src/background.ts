@@ -365,53 +365,27 @@ function parseSparseArray(obj: unknown): unknown[] {
     .filter(Boolean);
 }
 
-// Returns true if a gamestate has full player data (cardPiles present on any player).
-function isRichGamestate(gs: unknown): boolean {
-  const players = (gs as Record<string, unknown>)?.players as Record<string, unknown> | undefined;
-  if (!players) return false;
-  return Object.values(players).some(
-    (p) => (p as Record<string, unknown>)?.cardPiles !== undefined
-  );
-}
 
-// After finding a house-choice message at snaps[afterIndex], return the next
-// gamestate that has full card data. Falls back to the original if none found.
-function findNextRichGamestate(snaps: unknown[], afterIndex: number): unknown {
-  for (let j = afterIndex + 1; j < snaps.length; j++) {
-    if (isRichGamestate(snaps[j])) return snaps[j];
-  }
-  return snaps[afterIndex];
-}
 
-// Detect local player by finding the player whose hand contains non-facedown
-// cards. Falls back to "" if no rich gamestate has visible hand cards.
-function detectLocalPlayer(snaps: unknown[]): string {
-  for (const snap of snaps) {
-    const players = (snap as Record<string, unknown>)?.players as Record<string, unknown> | undefined;
-    if (!players) continue;
-    for (const [pname, pdata] of Object.entries(players)) {
-      const cardPiles = (pdata as Record<string, unknown>)?.cardPiles as Record<string, unknown> | undefined;
-      if (!cardPiles) continue;
-      const hasVisible = parseSparseArray(cardPiles.hand).some(
-        (c) => (c as Record<string, unknown>).facedown === false
-      );
-      if (hasVisible) return pname;
-    }
-  }
-  return "";
-}
+// Card location tracker types — accumulated across all gamestates in buildGameEvents.
+type CardPileMap = Map<string, string>;           // cardId → pileName
+type CardDataMap = Map<string, Record<string, unknown>>; // cardId → merged card fields
 
+// Extract a turn snapshot using accumulated card tracking maps rather than raw
+// delta snapshots. Crucible sends jsondiffpatch deltas, so a single snapshot
+// only has cards that *changed* — not all cards currently in hand/play. By
+// accumulating card locations across all snapshots we get accurate counts.
 function extractTurnSnapshot(
-  gs: unknown,
   housePicker: string,
   house: string,
   turnNumber: number,
   timestamp_ms: number,
-  effectiveLocalPlayer: string
+  effectiveLocalPlayer: string,
+  playerCardPile: Map<string, CardPileMap>,
+  playerCardData: Map<string, CardDataMap>,
+  playerAmber: Map<string, number>,
+  playerDeckSize: Map<string, number>
 ): TurnSnapshot {
-  const players = (gs as Record<string, unknown>)?.players as
-    | Record<string, unknown>
-    | undefined;
   const amber: Record<string, number> = {};
   const deck_size: Record<string, number> = {};
   const discard_size: Record<string, number> = {};
@@ -419,33 +393,24 @@ function extractTurnSnapshot(
   const boards: Record<string, BoardCardSnapshot[]> = {};
   let local_hand: HandCardSnapshot[] = [];
 
-  if (players) {
-    for (const [pname, pdata] of Object.entries(players)) {
-      const p = pdata as Record<string, unknown>;
-      const cardPiles = p?.cardPiles as Record<string, unknown> | undefined;
-      // Skip players whose data isn't available (opponent is usually just {clock:...})
-      if (!cardPiles) continue;
-      const stats = p?.stats as Record<string, unknown> | undefined;
+  for (const [pname, cardPileMap] of playerCardPile.entries()) {
+    const cardDataMap = playerCardData.get(pname)!;
+    amber[pname] = playerAmber.get(pname) ?? 0;
+    deck_size[pname] = playerDeckSize.get(pname) ?? 0;
+    let discardCount = 0;
+    let archiveCount = 0;
+    const boardCards: BoardCardSnapshot[] = [];
+    const handCards: HandCardSnapshot[] = [];
 
-      // Amber: stats.amber[1] is current value
-      const amberArr = stats?.amber;
-      amber[pname] = Array.isArray(amberArr) ? ((amberArr[1] as number) ?? 0) : 0;
-
-      // Deck size: count cards in the deck pile (more reliable than numDeckCards which is often absent)
-      deck_size[pname] = parseSparseArray(cardPiles.deck).length;
-
-      // Archive size
-      archive_size[pname] = parseSparseArray(cardPiles.archives).length;
-
-      // Discard size
-      discard_size[pname] = parseSparseArray(cardPiles.discard).length;
-
-      // Board: cardsInPlay
-      const boardCards = parseSparseArray(cardPiles.cardsInPlay);
-      boards[pname] = boardCards.map((c) => {
-        const card = c as Record<string, unknown>;
-        return {
-          id: String(card.id ?? ""),
+    for (const [cardId, pile] of cardPileMap.entries()) {
+      const card = cardDataMap.get(cardId) ?? {};
+      if (pile === "discard") {
+        discardCount++;
+      } else if (pile === "archives") {
+        archiveCount++;
+      } else if (pile === "cardsInPlay") {
+        boardCards.push({
+          id: cardId,
           name: String(card.name ?? ""),
           type: String(card.type ?? ""),
           house: String(card.printedHouse ?? ""),
@@ -453,27 +418,25 @@ function extractTurnSnapshot(
           exhausted: Boolean(card.exhausted),
           stunned: Boolean(card.stunned),
           taunt: Boolean(card.taunt),
-        };
-      });
-
-      // Hand — only for local player; opponent hand cards are facedown
-      if (pname === effectiveLocalPlayer) {
-        const handCards = parseSparseArray(cardPiles.hand);
-        local_hand = handCards
-          .filter((c) => (c as Record<string, unknown>).facedown === false)
-          .map((c) => {
-            const card = c as Record<string, unknown>;
-            return {
-              id: String(card.id ?? ""),
-              name: String(card.name ?? ""),
-              type: String(card.type ?? ""),
-              house: String(card.printedHouse ?? ""),
-              amber: Number(card.cardPrintedAmber ?? 0),
-              can_play: Boolean(card.canPlay ?? true),
-            };
+        });
+      } else if (pile === "hand" && pname === effectiveLocalPlayer) {
+        if (card.facedown === false) {
+          handCards.push({
+            id: cardId,
+            name: String(card.name ?? ""),
+            type: String(card.type ?? ""),
+            house: String(card.printedHouse ?? ""),
+            amber: Number(card.cardPrintedAmber ?? 0),
+            can_play: Boolean(card.canPlay ?? true),
           });
+        }
       }
     }
+
+    discard_size[pname] = discardCount;
+    archive_size[pname] = archiveCount;
+    boards[pname] = boardCards;
+    if (pname === effectiveLocalPlayer) local_hand = handCards;
   }
 
   return {
@@ -503,22 +466,85 @@ const FORGE_COLOR_MAP: Record<string, string> = {
   forgedkeyblue: "Blue",
 };
 
+// The pile names we track card movements through.
+const TRACKED_PILES = [
+  "hand",
+  "cardsInPlay",
+  "discard",
+  "archives",
+  "purged",
+] as const;
+
 function buildGameEvents(session: GameSession): {
   turnTiming: TurnTimingEntry[];
   keyEvents: KeyForgeEvent[];
   turnSnapshots: TurnSnapshot[];
 } {
   const snaps = session.gamestateSnapshots;
-  const effectiveLocalPlayer = localPlayer || detectLocalPlayer(snaps);
   const seenKeys = new Set<string>();
   const turnTiming: TurnTimingEntry[] = [];
   const keyEvents: KeyForgeEvent[] = [];
   const turnSnapshots: TurnSnapshot[] = [];
   let turnNumber = 0;
 
+  // Accumulated card-location state: updated on every gamestate (delta or full).
+  // Crucible uses jsondiffpatch format: card added to a pile → value is [card_obj].
+  // We record the most-recent pile each card was seen entering, and merge card
+  // fields so we always have up-to-date data when we need a turn snapshot.
+  const playerCardPile = new Map<string, CardPileMap>();
+  const playerCardData = new Map<string, CardDataMap>();
+  const playerAmber = new Map<string, number>();
+  const playerDeckSize = new Map<string, number>();
+
+  function updateTracking(gs: Record<string, unknown>): void {
+    const players = gs?.players as Record<string, unknown> | undefined;
+    if (!players) return;
+    for (const [pname, pdata] of Object.entries(players)) {
+      const p = pdata as Record<string, unknown>;
+      // Accumulate amber from stats (delta format: [old, new])
+      const amberArr = (p?.stats as Record<string, unknown> | undefined)?.amber;
+      if (Array.isArray(amberArr) && typeof amberArr[1] === "number") {
+        playerAmber.set(pname, amberArr[1]);
+      }
+      // Accumulate deck size from numDeckCards (present on some snapshots)
+      if (typeof p?.numDeckCards === "number") {
+        playerDeckSize.set(pname, p.numDeckCards as number);
+      }
+      const cardPiles = p?.cardPiles as Record<string, unknown> | undefined;
+      if (!cardPiles) continue;
+      if (!playerCardPile.has(pname)) {
+        playerCardPile.set(pname, new Map());
+        playerCardData.set(pname, new Map());
+      }
+      const cardPileMap = playerCardPile.get(pname)!;
+      const cardDataMap = playerCardData.get(pname)!;
+      for (const pileName of TRACKED_PILES) {
+        const pile = cardPiles[pileName];
+        if (!pile || typeof pile !== "object" || Array.isArray(pile)) continue;
+        for (const [k, v] of Object.entries(pile as Record<string, unknown>)) {
+          if (k.startsWith("_")) continue;
+          // jsondiffpatch "added" format: [card_obj] (single-element array with full data)
+          if (!Array.isArray(v) || v.length !== 1) continue;
+          const card = v[0] as Record<string, unknown>;
+          if (typeof card !== "object" || card === null) continue;
+          const cardId = card.id;
+          if (typeof cardId !== "string" || !cardId) continue;
+          // Record where this card is now (overwrites prior pile)
+          cardPileMap.set(cardId, pileName);
+          // Merge card fields (newer fields win; preserves data from initial full state)
+          cardDataMap.set(cardId, { ...(cardDataMap.get(cardId) ?? {}), ...card });
+        }
+      }
+    }
+  }
+
   for (let snapIdx = 0; snapIdx < snaps.length; snapIdx++) {
     const snapshot = snaps[snapIdx];
     const gs = snapshot as Record<string, unknown>;
+
+    // Update card-location tracking on every snapshot (deltas are cumulative)
+    updateTracking(gs);
+
     const messages = gs?.messages;
     if (typeof messages !== "object" || messages === null || Array.isArray(messages)) {
       continue; // skip pre-game list format
@@ -547,6 +573,22 @@ function buildGameEvents(session: GameSession): {
         const houseMatch = HOUSE_CHOICE_RE.exec(text);
         if (houseMatch) {
           turnNumber++;
+          // Detect local player from accumulated card data: the player whose hand
+          // has cards with facedown:false (opponent's hand cards are always facedown).
+          let effectiveLocalPlayer = localPlayer;
+          if (!effectiveLocalPlayer) {
+            for (const [pname, cpMap] of playerCardPile.entries()) {
+              const cdMap = playerCardData.get(pname)!;
+              if (
+                [...cpMap.entries()].some(
+                  ([id, pile]) => pile === "hand" && cdMap.get(id)?.facedown === false
+                )
+              ) {
+                effectiveLocalPlayer = pname;
+                break;
+              }
+            }
+          }
           turnTiming.push({
             turn: turnNumber,
             player: houseMatch[1],
@@ -555,9 +597,15 @@ function buildGameEvents(session: GameSession): {
           });
           turnSnapshots.push(
             extractTurnSnapshot(
-              findNextRichGamestate(snaps, snapIdx),
-              houseMatch[1], houseMatch[2], turnNumber, timestamp_ms,
-              effectiveLocalPlayer
+              houseMatch[1],
+              houseMatch[2],
+              turnNumber,
+              timestamp_ms,
+              effectiveLocalPlayer,
+              playerCardPile,
+              playerCardData,
+              playerAmber,
+              playerDeckSize
             )
           );
           continue;
