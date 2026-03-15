@@ -388,6 +388,31 @@ function extractTurnSnapshot(
       const cardPiles = p?.cardPiles as Record<string, unknown> | undefined;
       const stats = p?.stats as Record<string, unknown> | undefined;
 
+      // Debug: on turn 1, dump raw structure so we can verify field paths
+      if (turnNumber === 1) {
+        dlog("SNAPSHOT_DEBUG", JSON.stringify({
+          player: pname,
+          isLocalPlayer: pname === localPlayer,
+          localPlayerVar: localPlayer,
+          playerTopKeys: Object.keys(p),
+          cardPilesKeys: cardPiles ? Object.keys(cardPiles) : null,
+          statsKeys: stats ? Object.keys(stats) : null,
+          "stats.amber": stats?.amber,
+          "p.numDeckCards": p?.numDeckCards,
+          "p.numArchivesCards": p?.numArchivesCards,
+          handRaw: Array.isArray(cardPiles?.hand)
+            ? (cardPiles!.hand as unknown[]).slice(0, 1)
+            : cardPiles?.hand !== undefined
+              ? { type: typeof cardPiles.hand, keys: Object.keys(cardPiles.hand as object).slice(0, 10) }
+              : null,
+          cardsInPlayRaw: Array.isArray(cardPiles?.cardsInPlay)
+            ? (cardPiles!.cardsInPlay as unknown[]).length
+            : cardPiles?.cardsInPlay !== undefined
+              ? { type: typeof cardPiles.cardsInPlay, keys: Object.keys(cardPiles.cardsInPlay as object).slice(0, 10) }
+              : null,
+        }), false);
+      }
+
       // Amber: stats.amber is array; index 1 is current value
       const amberArr = stats?.amber;
       amber[pname] = Array.isArray(amberArr) ? ((amberArr[1] as number) ?? 0) : 0;
