@@ -409,7 +409,7 @@ function extractTurnSnapshot(
       } else if (pile === "archives") {
         archiveCount++;
       } else if (pile === "cardsInPlay") {
-        boardCards.push({
+        const boardCard: BoardCardSnapshot = {
           id: cardId,
           name: String(card.name ?? ""),
           type: String(card.type ?? ""),
@@ -418,17 +418,23 @@ function extractTurnSnapshot(
           exhausted: Boolean(card.exhausted),
           stunned: Boolean(card.stunned),
           taunt: Boolean(card.taunt),
-        });
+        };
+        const enh = card.enhancements;
+        if (Array.isArray(enh) && enh.length > 0) boardCard.enhancements = enh as string[];
+        boardCards.push(boardCard);
       } else if (pile === "hand" && pname === effectiveLocalPlayer) {
         if (card.facedown === false) {
-          handCards.push({
+          const handCard: HandCardSnapshot = {
             id: cardId,
             name: String(card.name ?? ""),
             type: String(card.type ?? ""),
             house: String(card.printedHouse ?? ""),
             amber: Number(card.cardPrintedAmber ?? 0),
             can_play: Boolean(card.canPlay ?? true),
-          });
+          };
+          const enh = card.enhancements;
+          if (Array.isArray(enh) && enh.length > 0) handCard.enhancements = enh as string[];
+          handCards.push(handCard);
         }
       }
     }
