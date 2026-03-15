@@ -356,7 +356,7 @@ function parseSparseArray(obj: unknown): unknown[] {
   if (!obj || typeof obj !== "object" || Array.isArray(obj)) return [];
   const dict = obj as Record<string, unknown>;
   return Object.keys(dict)
-    .filter((k) => k !== "_t")
+    .filter((k) => !k.startsWith("_"))   // drop _t, _0, _4, etc. (delta markers)
     .sort((a, b) => Number(a) - Number(b))
     .flatMap((k) => {
       const v = dict[k];
@@ -423,59 +423,32 @@ function extractTurnSnapshot(
     for (const [pname, pdata] of Object.entries(players)) {
       const p = pdata as Record<string, unknown>;
       const cardPiles = p?.cardPiles as Record<string, unknown> | undefined;
+      // Skip players whose data isn't available (opponent is usually just {clock:...})
+      if (!cardPiles) continue;
       const stats = p?.stats as Record<string, unknown> | undefined;
 
-      // Debug: on turn 1, dump raw structure so we can verify field paths
-      if (turnNumber === 1) {
-        dlog("SNAPSHOT_DEBUG", JSON.stringify({
-          player: pname,
-          isLocalPlayer: pname === effectiveLocalPlayer,
-          localPlayerVar: effectiveLocalPlayer,
-          playerTopKeys: Object.keys(p),
-          cardPilesKeys: cardPiles ? Object.keys(cardPiles) : null,
-          statsKeys: stats ? Object.keys(stats) : null,
-          "stats.amber": stats?.amber,
-          "p.numDeckCards": p?.numDeckCards,
-          "p.numArchivesCards": p?.numArchivesCards,
-          handRaw: Array.isArray(cardPiles?.hand)
-            ? (cardPiles!.hand as unknown[]).slice(0, 1)
-            : cardPiles?.hand !== undefined
-              ? { type: typeof cardPiles.hand, keys: Object.keys(cardPiles.hand as object).slice(0, 10) }
-              : null,
-          cardsInPlayRaw: Array.isArray(cardPiles?.cardsInPlay)
-            ? (cardPiles!.cardsInPlay as unknown[]).length
-            : cardPiles?.cardsInPlay !== undefined
-              ? { type: typeof cardPiles.cardsInPlay, keys: Object.keys(cardPiles.cardsInPlay as object).slice(0, 10) }
-              : null,
-        }), false);
-      }
-
-      // Amber: stats.amber is array; index 1 is current value
+      // Amber: stats.amber[1] is current value
       const amberArr = stats?.amber;
       amber[pname] = Array.isArray(amberArr) ? ((amberArr[1] as number) ?? 0) : 0;
 
-      // Deck size: numDeckCards[1]
-      const numDeck = p?.numDeckCards;
-      deck_size[pname] = Array.isArray(numDeck) ? ((numDeck[1] as number) ?? 0) : 0;
+      // Deck size: count cards in the deck pile (more reliable than numDeckCards which is often absent)
+      deck_size[pname] = parseSparseArray(cardPiles.deck).length;
 
-      // Archive size: numArchivesCards[1]
-      const numArchive = p?.numArchivesCards;
-      archive_size[pname] = Array.isArray(numArchive)
-        ? ((numArchive[1] as number) ?? 0)
-        : 0;
+      // Archive size
+      archive_size[pname] = parseSparseArray(cardPiles.archives).length;
 
       // Discard size
-      discard_size[pname] = parseSparseArray(cardPiles?.discard).length;
+      discard_size[pname] = parseSparseArray(cardPiles.discard).length;
 
-      // Board: cardsInPlay (both players visible)
-      const boardCards = parseSparseArray(cardPiles?.cardsInPlay);
+      // Board: cardsInPlay
+      const boardCards = parseSparseArray(cardPiles.cardsInPlay);
       boards[pname] = boardCards.map((c) => {
         const card = c as Record<string, unknown>;
         return {
           id: String(card.id ?? ""),
           name: String(card.name ?? ""),
           type: String(card.type ?? ""),
-          house: String(card.house ?? ""),
+          house: String(card.printedHouse ?? ""),
           power: Number(card.modifiedPower ?? 0),
           exhausted: Boolean(card.exhausted),
           stunned: Boolean(card.stunned),
@@ -483,21 +456,18 @@ function extractTurnSnapshot(
         };
       });
 
-      // Hand — only for local player; opponent cards are facedown
+      // Hand — only for local player; opponent hand cards are facedown
       if (pname === effectiveLocalPlayer) {
-        const handCards = parseSparseArray(cardPiles?.hand);
+        const handCards = parseSparseArray(cardPiles.hand);
         local_hand = handCards
-          .filter((c) => {
-            const card = c as Record<string, unknown>;
-            return card.facedown === false;
-          })
+          .filter((c) => (c as Record<string, unknown>).facedown === false)
           .map((c) => {
             const card = c as Record<string, unknown>;
             return {
               id: String(card.id ?? ""),
               name: String(card.name ?? ""),
               type: String(card.type ?? ""),
-              house: String(card.house ?? ""),
+              house: String(card.printedHouse ?? ""),
               amber: Number(card.cardPrintedAmber ?? 0),
               can_play: Boolean(card.canPlay ?? true),
             };
