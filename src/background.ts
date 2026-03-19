@@ -166,11 +166,12 @@ chrome.storage.local
       setBadge("●", "#1565c0");
     }
     const guard = result[GUARD_STORE_KEY] as
-      | { players: string[]; expiry: number }
+      | { players: string[]; expiry: number; crucibleId?: string }
       | undefined;
     if (guard && guard.expiry > Date.now()) {
       postGamePlayerSet = new Set(guard.players);
       postGameGuardExpiry = guard.expiry;
+      postGameCrucibleId = guard.crucibleId ?? null;
     } else if (guard) {
       chrome.storage.local.remove(GUARD_STORE_KEY);
     }
@@ -181,13 +182,17 @@ chrome.storage.local
 // ─── Session Management ──────────────────────────────────────────────────────
 
 // After a game ends, block new sessions with the same player set for a
-// grace period (POST_GAME_GUARD_MS). `handoff` never reliably fires, so we
-// use a time-based expiry instead. For a different opponent the guard clears
+// grace period (POST_GAME_GUARD_MS). For a different opponent the guard clears
 // immediately (different player set = new opponent, no risk of double-session).
+// For rematches (same players, new game), we use the game UUID to distinguish:
+// gamestates carrying the previous game's UUID are post-game artifacts; a
+// different UUID means the new game has genuinely started.
 const POST_GAME_GUARD_MS = 90_000; // 90 seconds — post-game gamestates last ~55s
+const PRE_GAME_TIMEOUT_MS = 5 * 60_000; // 5 minutes — discard lobby sessions that never launched
 
 let postGamePlayerSet: Set<string> | null = null;
 let postGameGuardExpiry: number | null = null;
+let postGameCrucibleId: string | null = null; // UUID of the completed game
 
 function guardActive(): boolean {
   if (postGamePlayerSet === null) return false;
@@ -198,7 +203,7 @@ function guardActive(): boolean {
   return true;
 }
 
-function ensureSession(playerNames?: string[]): GameSession | null {
+function ensureSession(playerNames?: string[], incomingGameId?: string): GameSession | null {
   if (guardActive()) {
     // Empty player list (players={}) is always a post-game or lobby artifact —
     // never a real new game starting. Block it while the guard is active.
@@ -208,14 +213,35 @@ function ensureSession(playerNames?: string[]): GameSession | null {
     // immediately (they introduce a player not in the post-game set).
     const isRematchOrPostGame = playerNames.every((n) => postGamePlayerSet!.has(n));
     if (isRematchOrPostGame) {
-      const expiresIn = postGameGuardExpiry ? Math.round((postGameGuardExpiry - Date.now()) / 1000) : 0;
-      console.log(`[KT] Guard blocked session for players=[${playerNames.join(",")}] — same as previous game, expires in ${expiresIn}s`);
-      return null; // still in post-game / rematch context
+      // Rematches: allow through if the gamestate carries a DIFFERENT game UUID —
+      // that's proof the new game has started, not a post-game broadcast.
+      if (incomingGameId && postGameCrucibleId && incomingGameId !== postGameCrucibleId) {
+        console.log(`[KT] Guard cleared — new game UUID detected (${incomingGameId.slice(0, 8)})`);
+        clearPostGameGuard();
+      } else {
+        const expiresIn = postGameGuardExpiry ? Math.round((postGameGuardExpiry - Date.now()) / 1000) : 0;
+        console.log(`[KT] Guard blocked session for players=[${playerNames.join(",")}] — same game UUID or unknown, expires in ${expiresIn}s`);
+        return null; // still in post-game / rematch context
+      }
+    } else {
+      // At least one new player → new opponent, clear immediately
+      console.log(`[KT] Guard cleared — new opponent detected players=[${playerNames.join(",")}]`);
+      clearPostGameGuard();
     }
-    // At least one new player → new opponent, clear immediately
-    console.log(`[KT] Guard cleared — new opponent detected players=[${playerNames.join(",")}]`);
-    clearPostGameGuard();
   }
+  // Discard a pre-game session that sat in the lobby too long without launching.
+  // Checked on every gamestate so cleanup is prompt once activity resumes.
+  if (currentSession && !currentSession.gameStarted) {
+    const age = Date.now() - currentSession.startTime;
+    if (age > PRE_GAME_TIMEOUT_MS) {
+      console.log(`[KT] Pre-game session timed out after ${Math.round(age / 1000)}s, discarding ${currentSession.sessionId}`);
+      dlog("DISCARD", `session ${currentSession.sessionId} discarded — pre-game timeout (${Math.round(age / 1000)}s)`, false);
+      currentSession = null;
+      clearPersistedSession();
+      setBadge("", "#666666");
+    }
+  }
+
   if (!currentSession) {
     // Never start a new session from a gamestate without both players present.
     // Delta gamestates, spectator broadcasts, and post-game lobby artifacts all
@@ -233,6 +259,7 @@ function ensureSession(playerNames?: string[]): GameSession | null {
 function clearPostGameGuard(): void {
   postGamePlayerSet = null;
   postGameGuardExpiry = null;
+  postGameCrucibleId = null;
   chrome.storage.local.remove(GUARD_STORE_KEY);
 }
 
@@ -737,8 +764,24 @@ async function doSubmit(session: GameSession): Promise<void> {
 
   // Submit extended data (turn timing + key forge events + snapshots) — non-fatal if it fails
   if (session.crucibleGameId) {
-    const { turnTiming, keyEvents, turnSnapshots, localPlayer: detectedLocal } = buildGameEvents(session);
-    if (turnTiming.length > 0 || keyEvents.length > 0) {
+    let turnTiming: ReturnType<typeof buildGameEvents>["turnTiming"] = [];
+    let keyEvents: ReturnType<typeof buildGameEvents>["keyEvents"] = [];
+    let turnSnapshots: ReturnType<typeof buildGameEvents>["turnSnapshots"] = [];
+    let detectedLocal = "";
+    try {
+      const result = buildGameEvents(session);
+      turnTiming = result.turnTiming;
+      keyEvents = result.keyEvents;
+      turnSnapshots = result.turnSnapshots;
+      detectedLocal = result.localPlayer;
+    } catch (err) {
+      console.error("[KT] buildGameEvents failed:", err);
+    }
+    console.log(
+      `[KT] Extended data: turns=${turnTiming.length} keyEvents=${keyEvents.length}` +
+      ` snapshots=${turnSnapshots.length} session=${session.sessionId}`
+    );
+    if (turnTiming.length > 0 || keyEvents.length > 0 || turnSnapshots.length > 0) {
       session.turnTiming = turnTiming;
       session.keyEvents = keyEvents;
       session.turnSnapshots = turnSnapshots;
@@ -765,6 +808,8 @@ async function doSubmit(session: GameSession): Promise<void> {
       }).catch((err: Error) => {
         console.warn("[KT] Extended data upload failed:", err.message);
       });
+    } else {
+      console.warn(`[KT] No extended data to upload for session ${session.sessionId}`);
     }
   }
 }
@@ -778,6 +823,7 @@ function finalizeSession(reason: string): void {
   ) as string[];
   postGamePlayerSet = names.length > 0 ? new Set(names) : null;
   postGameGuardExpiry = postGamePlayerSet !== null ? Date.now() + POST_GAME_GUARD_MS : null;
+  postGameCrucibleId = currentSession.crucibleGameId ?? null;
 
   // Persist guard state so a service worker restart within the post-game
   // window still blocks spurious re-sessions for the same players.
@@ -786,6 +832,7 @@ function finalizeSession(reason: string): void {
       [GUARD_STORE_KEY]: {
         players: [...postGamePlayerSet],
         expiry: postGameGuardExpiry,
+        crucibleId: postGameCrucibleId,
       },
     });
   }
@@ -873,7 +920,8 @@ function handleInjectEvent(
 
       const gsWinner = gs?.winner;
       const hasWinner = Array.isArray(gsWinner) && gsWinner.length > 0;
-      const session = ensureSession(playerNames);
+      const gsGameId = typeof gs?.id === "string" ? gs.id : undefined;
+      const session = ensureSession(playerNames, gsGameId);
       const blocked = !session;
       dlog(
         "KT_GAMESTATE",
@@ -913,8 +961,7 @@ function handleInjectEvent(
       // The pre-game gamestate has a top-level `id` field that IS the game UUID.
       // We prefer this over the lobby socket `updategame` events, which broadcast
       // ALL active games and can accidentally pick up a different game's UUID.
-      const gsGameId = gs?.id;
-      if (typeof gsGameId === "string" && !session.crucibleGameId) {
+      if (gsGameId && !session.crucibleGameId) {
         session.crucibleGameId = gsGameId;
       }
 
@@ -983,11 +1030,11 @@ function handleInjectEvent(
       // off from lobby server to game server. It's the definitive signal that
       // a NEW game has started — safe to clear the post-game guard here.
       if (ev?.eventName === "handoff") {
-        // Belt-and-suspenders: clear guard early if handoff does fire.
-        // In practice handoff doesn't appear to fire reliably; we use
-        // time-based expiry (POST_GAME_GUARD_MS) as the primary mechanism.
-        dlog("KT_SOCKET_EVENT", "handoff — clearing post-game guard early", false);
-        clearPostGameGuard();
+        // handoff = socket handed off from lobby to game server.
+        // We no longer use this to clear the post-game guard (that caused
+        // phantom sessions for rematches). Game UUID comparison in ensureSession
+        // is now the authoritative way to allow same-player rematches.
+        dlog("KT_SOCKET_EVENT", "handoff received", false);
         if (currentSession) currentSession.gameStarted = true;
       } else if (ev?.eventName === "removegame" && currentSession && !currentSession.gameStarted) {
         // The lobby was disbanded before the game started — discard the session.
@@ -1121,8 +1168,12 @@ function handleInjectEvent(
         clearPersistedSession();
         setBadge("", "#666666");
       } else if (currentSession) {
+        // WS closed mid-game (crash/disconnect) — finalize so the next game
+        // can be captured. Winner will be unknown; auto-submit is skipped for
+        // unknown winners so nothing bad is submitted.
+        console.log(`[KT] ${type}: WS closed mid-game, finalizing session ${currentSession.sessionId}`);
         currentSession.events.push(event);
-        schedulePersist();
+        finalizeSession("ws_closed_mid_game");
       }
       break;
     }
