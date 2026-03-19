@@ -284,7 +284,7 @@ export default function App() {
           <Typography variant="h6" sx={{ fontSize: 15, fontWeight: 700 }}>
             KeyTracker
           </Typography>
-          <Chip label="v1.0" size="small" color="primary" variant="outlined" />
+          <Chip label="v1.2" size="small" color="primary" variant="outlined" />
         </Stack>
         <Stack direction="row" spacing={0.5}>
           <Tooltip title="Settings">
