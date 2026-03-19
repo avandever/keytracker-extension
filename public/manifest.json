@@ -5,7 +5,7 @@
   "description": "Captures and submits KeyForge game data from thecrucible.online to Bear Tracks.",
   "homepage_url": "https://tracker.ancientbearrepublic.com",
   "privacy_policy": "https://tracker.ancientbearrepublic.com/privacy",
-  "permissions": ["storage"],
+  "permissions": ["storage", "downloads"],
   "host_permissions": [
     "*://thecrucible.online/*",
     "https://tracker.ancientbearrepublic.com/*"

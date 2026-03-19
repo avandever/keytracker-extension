@@ -59,7 +59,8 @@ export type InjectEventType =
   | "KT_DECK_LINK" // deck UUID extracted from DOM log pane anchor tag
   | "KT_REDUX_STATE" // Redux currentGame state snapshot
   | "KT_STORE_FOUND" // Redux store successfully located
-  | "KT_LOCAL_USER"; // local player username detected
+  | "KT_LOCAL_USER" // local player username detected
+  | "KT_PAGE_UNLOAD"; // page is being hidden/unloaded (pagehide event)
 
 export interface InjectMessage {
   source: "KT_INJECT";
@@ -114,6 +115,7 @@ export interface GameSession {
 export interface Settings {
   autoSubmit: boolean;
   debugMode: boolean;
+  autoSaveDebugLog: boolean; // auto-download debug log to Downloads/kt_debug/ on game end
 }
 
 // One entry in the debug event log (captured regardless of session state)

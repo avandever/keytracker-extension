@@ -183,6 +183,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [draftAutoSubmit, setDraftAutoSubmit] = useState(false);
   const [draftDebugMode, setDraftDebugMode] = useState(false);
+  const [draftAutoSaveDebugLog, setDraftAutoSaveDebugLog] = useState(false);
 
   const refresh = useCallback(() => {
     setLoading(true);
@@ -208,11 +209,16 @@ export default function App() {
     if (state?.settings) {
       setDraftAutoSubmit(state.settings.autoSubmit);
       setDraftDebugMode(state.settings.debugMode ?? false);
+      setDraftAutoSaveDebugLog(state.settings.autoSaveDebugLog ?? false);
     }
   }, [state?.settings]);
 
   function handleClearCompleted() {
     chrome.runtime.sendMessage({ type: "CLEAR_COMPLETED" }).then(refresh);
+  }
+
+  function handleDiscardActive() {
+    chrome.runtime.sendMessage({ type: "CLEAR_ALL" }).then(refresh);
   }
 
   function handleDownloadAll() {
@@ -259,6 +265,7 @@ export default function App() {
     const newSettings: Settings = {
       autoSubmit: draftAutoSubmit,
       debugMode: draftDebugMode,
+      autoSaveDebugLog: draftAutoSaveDebugLog,
     };
     chrome.runtime
       .sendMessage({ type: "SAVE_SETTINGS", settings: newSettings })
@@ -328,6 +335,16 @@ export default function App() {
             }
             label={<Typography variant="body2">Debug event logging</Typography>}
           />
+          <FormControlLabel
+            control={
+              <Switch
+                size="small"
+                checked={draftAutoSaveDebugLog}
+                onChange={(e) => setDraftAutoSaveDebugLog(e.target.checked)}
+              />
+            }
+            label={<Typography variant="body2">Auto-save debug log on game end</Typography>}
+          />
           <Stack direction="row" spacing={1} justifyContent="flex-end" mt={0.5}>
             {state?.settings?.debugMode && (
               <>
@@ -361,9 +378,16 @@ export default function App() {
           {/* Active session */}
           {current ? (
             <>
-              <Typography variant="overline" color="primary">
-                Active Game
-              </Typography>
+              <Stack direction="row" alignItems="center" justifyContent="space-between" mb={0.25}>
+                <Typography variant="overline" color="primary">
+                  Active Game
+                </Typography>
+                <Tooltip title="Discard session">
+                  <IconButton size="small" onClick={handleDiscardActive}>
+                    <DeleteSweepIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              </Stack>
               <SessionCard
                 session={current}
                 isActive

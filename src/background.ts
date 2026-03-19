@@ -32,6 +32,7 @@ const TRACKER_URL = "https://tracker.ancientbearrepublic.com";
 const DEFAULT_SETTINGS: Settings = {
   autoSubmit: true,
   debugMode: false,
+  autoSaveDebugLog: false,
 };
 
 // Local player username detected from the page (DOM / Redux auth state)
@@ -52,9 +53,38 @@ const DEBUG_LOG_MAX = 500;
 const debugLog: DebugLogEntry[] = [];
 
 function dlog(type: string, detail: string, guardBlocked: boolean): void {
-  if (!settings.debugMode) return;
+  if (!settings.debugMode && !settings.autoSaveDebugLog) return;
   debugLog.push({ ts: Date.now(), type, detail, guardBlocked });
   if (debugLog.length > DEBUG_LOG_MAX) debugLog.shift();
+}
+
+function autoSaveDebugLogToDownloads(session: GameSession): void {
+  if (!settings.autoSaveDebugLog) return;
+  const label = session.crucibleGameId
+    ? session.crucibleGameId.slice(0, 8)
+    : session.sessionId.slice(3, 11);
+  const date = new Date(session.endTime ?? Date.now()).toISOString().slice(0, 10);
+  const filename = `kt_debug/kt_debug_${label}_${date}.json`;
+  const payload = {
+    session: {
+      sessionId: session.sessionId,
+      crucibleGameId: session.crucibleGameId,
+      player1: session.player1,
+      player2: session.player2,
+      winner: session.winner,
+      player1DeckName: session.player1DeckName,
+      player2DeckName: session.player2DeckName,
+      player1DeckId: session.player1DeckId,
+      player2DeckId: session.player2DeckId,
+      gameEndReason: session.gameEndReason,
+      snapshotCount: session.gamestateSnapshots.length,
+    },
+    debugLog,
+  };
+  const dataUrl =
+    "data:application/json;base64," +
+    btoa(unescape(encodeURIComponent(JSON.stringify(payload, null, 2))));
+  chrome.downloads.download({ url: dataUrl, filename, saveAs: false });
 }
 
 // ─── State ──────────────────────────────────────────────────────────────────
@@ -177,8 +207,13 @@ function ensureSession(playerNames?: string[]): GameSession | null {
     // post-game gamestates (subset of players) while allowing new opponents
     // immediately (they introduce a player not in the post-game set).
     const isRematchOrPostGame = playerNames.every((n) => postGamePlayerSet!.has(n));
-    if (isRematchOrPostGame) return null; // still in post-game / rematch context
+    if (isRematchOrPostGame) {
+      const expiresIn = postGameGuardExpiry ? Math.round((postGameGuardExpiry - Date.now()) / 1000) : 0;
+      console.log(`[KT] Guard blocked session for players=[${playerNames.join(",")}] — same as previous game, expires in ${expiresIn}s`);
+      return null; // still in post-game / rematch context
+    }
     // At least one new player → new opponent, clear immediately
+    console.log(`[KT] Guard cleared — new opponent detected players=[${playerNames.join(",")}]`);
     clearPostGameGuard();
   }
   if (!currentSession) {
@@ -188,6 +223,7 @@ function ensureSession(playerNames?: string[]): GameSession | null {
     // from other games that the lobby socket broadcasts to all connected clients.
     if (!playerNames || playerNames.length < 2) return null;
     currentSession = makeSession();
+    console.log(`[KT] Session started: ${currentSession.sessionId} players=[${playerNames.join(",")}]`);
     setBadge("●", "#1565c0"); // blue: in progress
     schedulePersist();
   }
@@ -674,6 +710,16 @@ async function doSubmit(session: GameSession): Promise<void> {
   if (winnerDeckId) body.set("winner_deck_id", winnerDeckId);
   if (loserDeckId) body.set("loser_deck_id", loserDeckId);
 
+  console.log(
+    `[KT] Submitting session ${session.sessionId}:` +
+    ` crucibleGameId=${session.crucibleGameId ?? "none"}` +
+    ` players=[${session.player1 ?? "?"},${session.player2 ?? "?"}]` +
+    ` winner=${session.winner ?? "?"}` +
+    ` decks=[${session.player1DeckName ?? "UNSET"},${session.player2DeckName ?? "UNSET"}]` +
+    ` deckIds=[${session.player1DeckId ?? "none"},${session.player2DeckId ?? "none"}]` +
+    ` logLines=${log.split("\n").length}`
+  );
+
   const url = `${TRACKER_URL}/api/upload_log/v1`;
   const resp = await fetch(url, { method: "POST", body });
 
@@ -687,6 +733,7 @@ async function doSubmit(session: GameSession): Promise<void> {
   if (typeof json.game_id === "number") {
     session.submittedGameId = json.game_id;
   }
+  console.log(`[KT] Submission succeeded: game_id=${session.submittedGameId ?? "?"} session=${session.sessionId}`);
 
   // Submit extended data (turn timing + key forge events + snapshots) — non-fatal if it fails
   if (session.crucibleGameId) {
@@ -746,10 +793,21 @@ function finalizeSession(reason: string): void {
   currentSession.endTime = Date.now();
   currentSession.gameEndReason = reason;
   currentSession.finalLog = buildLog(currentSession);
+  const _fs = currentSession;
+  console.log(
+    `[KT] Session finalized: ${_fs.sessionId} reason=${reason}` +
+    ` winner=${_fs.winner ?? "?"} players=[${_fs.player1 ?? "?"},${_fs.player2 ?? "?"}]` +
+    ` decks=[${_fs.player1DeckName ?? "UNSET"},${_fs.player2DeckName ?? "UNSET"}]` +
+    ` deckIds=[${_fs.player1DeckId ?? "none"},${_fs.player2DeckId ?? "none"}]` +
+    ` snapshots=${_fs.gamestateSnapshots.length} logLines=${_fs.finalLog.split("\n").length}`
+  );
   completedSessions.push(currentSession);
+  const justFinalized = completedSessions[completedSessions.length - 1];
   currentSession = null;
   clearPersistedSession(); // game ended — no need to keep session in storage
   setBadge(`${completedSessions.length}`, "#2e7d32"); // green: completed
+
+  autoSaveDebugLogToDownloads(justFinalized);
 
   if (settings.autoSubmit) {
     const justFinished = completedSessions[completedSessions.length - 1];
@@ -890,7 +948,10 @@ function handleInjectEvent(
         if (pname && !session[slot] && pd[pname]) {
           const deck = pd[pname]?.deck as Record<string, unknown> | undefined;
           const dname = deck?.name;
-          if (typeof dname === "string") (session[slot] as string) = dname;
+          if (typeof dname === "string") {
+            (session[slot] as string) = dname;
+            console.log(`[KT] Deck name from gamestate: player=${pname} slot=${String(slot)} name=${dname}`);
+          }
         }
       }
       schedulePersist();
@@ -928,6 +989,13 @@ function handleInjectEvent(
         dlog("KT_SOCKET_EVENT", "handoff — clearing post-game guard early", false);
         clearPostGameGuard();
         if (currentSession) currentSession.gameStarted = true;
+      } else if (ev?.eventName === "removegame" && currentSession && !currentSession.gameStarted) {
+        // The lobby was disbanded before the game started — discard the session.
+        console.log(`[KT] removegame: discarding pre-game session ${currentSession.sessionId} (lobby dissolved)`);
+        dlog("DISCARD", `session ${currentSession.sessionId} discarded — removegame before game started`, false);
+        currentSession = null;
+        clearPersistedSession();
+        setBadge("", "#666666");
       } else {
         dlog(
           "KT_SOCKET_EVENT",
@@ -979,9 +1047,10 @@ function handleInjectEvent(
       const deckId = typeof link?.deckId === "string" ? link.deckId : null;
       const deckName = typeof link?.deckName === "string" ? link.deckName : null;
       const playerName = typeof link?.playerName === "string" ? link.playerName : null;
+      console.log(`[KT] KT_DECK_LINK: player=${playerName ?? "?"} deckId=${deckId ?? "?"} deckName=${deckName ?? "?"} hasCurrentSession=${!!currentSession}`);
       dlog(
         "KT_DECK_LINK",
-        `player=${playerName ?? "?"} deckId=${deckId ?? "?"}`,
+        `player=${playerName ?? "?"} deckId=${deckId ?? "?"} deckName=${deckName ?? "?"}`,
         false
       );
       if (deckId) {
@@ -1033,17 +1102,19 @@ function handleInjectEvent(
       }
       break;
 
-    case "KT_WS_CLOSE": {
+    case "KT_WS_CLOSE":
+    case "KT_PAGE_UNLOAD": {
       dlog(
-        "KT_WS_CLOSE",
+        type,
         `hasSession=${!!currentSession} gameStarted=${currentSession?.gameStarted ?? false}`,
         false
       );
       if (currentSession && !currentSession.gameStarted) {
-        // Lobby WS closed before game started — session was never a real game
+        // Page left or WS closed before game started — session was never a real game
+        console.log(`[KT] ${type}: discarding pre-game session ${currentSession.sessionId} (never launched)`);
         dlog(
           "DISCARD",
-          `session ${currentSession.sessionId} discarded — WS closed before game started`,
+          `session ${currentSession.sessionId} discarded — ${type} before game started`,
           false
         );
         currentSession = null;

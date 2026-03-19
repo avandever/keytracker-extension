@@ -504,6 +504,17 @@
     });
   }
 
+  // ─── Page Unload Detection ───────────────────────────────────────────────
+  //
+  // `pagehide` fires reliably when a tab is closed, navigated away from, or
+  // put into the bfcache — unlike `beforeunload` which is suppressed in many
+  // cases. We relay it so background.ts can discard pre-game sessions that
+  // were never launched (lobby exits that never produce a KT_WS_CLOSE).
+
+  window.addEventListener("pagehide", () => {
+    post("KT_PAGE_UNLOAD", { url: window.location.href });
+  });
+
   // ─── Bootstrap ───────────────────────────────────────────────────────────
 
   interceptWebSocket();
